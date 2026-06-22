@@ -1062,3 +1062,42 @@ func TestJSON_MachineReadableExportMatchesMarkdownRedaction(t *testing.T) {
 	assert.NotContains(t, markdown, openAIKey)
 	assert.NotContains(t, markdown, "/Users/tom")
 }
+
+func TestBuildMachineReadableExport_ProviderCallMissingIdentityStaysDeterministic(t *testing.T) {
+	t.Parallel()
+
+	session := Session{
+		ID:           "legacy-provider-call",
+		DefaultModel: "openai/gpt-test",
+		ProviderCalls: []ProviderCall{{
+			Provider:       "openai",
+			RequestedModel: "openai/gpt-test",
+			RequestMessages: []llm.Message{
+				{Role: llm.RoleSystem, Content: "reference context"},
+				{Role: llm.RoleUser, Content: "summarize"},
+			},
+			InputTokens:  3,
+			OutputTokens: 2,
+		}},
+	}
+	options := ExportOptions{Profile: ExportProfilePrivate, ExportedAt: fixedExportedAt}
+
+	first, err := JSONWithOptions(session, options)
+	require.NoError(t, err)
+	second, err := JSONWithOptions(session, options)
+	require.NoError(t, err)
+
+	assert.Equal(t, string(first), string(second))
+
+	var decoded MachineReadableExport
+	require.NoError(t, json.Unmarshal(first, &decoded))
+	require.Len(t, decoded.Provenance.ProviderCalls, 1)
+
+	call := decoded.Provenance.ProviderCalls[0]
+	assert.Empty(t, call.ID)
+	assert.True(t, call.CompletedAt.IsZero())
+	assert.NotEmpty(t, call.PromptHash)
+	assert.Equal(t, 5, call.TotalTokens)
+	require.Len(t, call.RequestMessages, 2)
+	assert.Equal(t, "reference context", call.RequestMessages[0].Content)
+}

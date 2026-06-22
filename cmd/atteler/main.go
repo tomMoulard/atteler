@@ -130,6 +130,8 @@ var terminalTitleSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "�
 // ---------------------------------------------------------------------------
 
 // llmResponseMsg is sent when the LLM call completes.
+//
+//nolint:govet // Field order groups response data for update handlers rather than pointer packing.
 type llmResponseMsg struct {
 	err                     error
 	completedAt             time.Time
@@ -139,6 +141,7 @@ type llmResponseMsg struct {
 	eventLines              []string
 	providerFailureMetadata map[string]string
 	routeDecision           *modelroute.Decision
+	providerCall            session.ProviderCall
 	toolLog                 []string // tool call summaries (command + truncated output)
 	tokenUsage              tokenUsage
 	liveEvents              bool

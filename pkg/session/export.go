@@ -68,6 +68,7 @@ type ExportManifest struct {
 type MachineReadableExport struct {
 	Manifest          ExportManifest            `json:"manifest"`
 	Session           ExportSessionMetadata     `json:"session"`
+	Provenance        ExportProvenance          `json:"provenance"`
 	NegativeKnowledge []ExportNegativeKnowledge `json:"negative_knowledge,omitempty"`
 	Evaluations       []ExportAgentEvaluation   `json:"evaluations,omitempty"`
 	Artifacts         []ExportArtifact          `json:"artifacts,omitempty"`
@@ -99,6 +100,113 @@ type ExportSessionMetadata struct {
 	EvaluationCount        int                 `json:"evaluation_count"`
 	ArtifactCount          int                 `json:"artifact_count"`
 	MultiAgentRunCount     int                 `json:"multi_agent_run_count"`
+	SchemaVersion          int                 `json:"schema_version,omitempty"`
+	EventSchemaVersion     int                 `json:"event_schema_version,omitempty"`
+}
+
+// ExportProvenance summarizes the replay inputs that explain how a session
+// result was produced without requiring consumers to parse the full transcript.
+//
+//nolint:govet // JSON field order keeps high-level provenance before lists.
+type ExportProvenance struct {
+	EventLog          *ExportEventLogProvenance `json:"event_log,omitempty"`
+	TokenUsage        ExportTokenUsage          `json:"token_usage,omitzero"`
+	ConfigHash        string                    `json:"config_hash"`
+	Providers         []string                  `json:"providers,omitempty"`
+	Models            []string                  `json:"models,omitempty"`
+	ProviderCalls     []ExportProviderCall      `json:"provider_calls,omitempty"`
+	ReferencedFiles   []ExportFileReference     `json:"referenced_files,omitempty"`
+	VerificationGates []ExportVerificationGate  `json:"verification_gates,omitempty"`
+}
+
+// ExportEventLogProvenance identifies the append-only log backing an export.
+type ExportEventLogProvenance struct {
+	Path          string `json:"path,omitempty"`
+	LastHash      string `json:"last_hash,omitempty"`
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	EventCount    int    `json:"event_count,omitempty"`
+	LastSequence  int64  `json:"last_sequence,omitempty"`
+	TruncatedTail bool   `json:"truncated_tail,omitempty"`
+}
+
+// ExportTokenUsage aggregates observed and estimated token/cost provenance.
+type ExportTokenUsage struct {
+	ModelCalls            int   `json:"model_calls,omitempty"`
+	InputTokens           int   `json:"input_tokens,omitempty"`
+	CachedInputTokens     int   `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int   `json:"cache_write_input_tokens,omitempty"`
+	OutputTokens          int   `json:"output_tokens,omitempty"`
+	TotalTokens           int   `json:"total_tokens,omitempty"`
+	EstimatedInputTokens  int   `json:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens int   `json:"estimated_output_tokens,omitempty"`
+	EstimatedTotalTokens  int   `json:"estimated_total_tokens,omitempty"`
+	EstimatedCostMicros   int64 `json:"estimated_cost_micros,omitempty"`
+}
+
+// ExportProviderCall records one provider request/response pair that influenced replay.
+//
+// Raw request messages are included only for private full-fidelity exports; safe
+// profiles keep prompt/config/response hashes plus counts so consumers can still
+// correlate the export with the append-only audit log without leaking injected
+// file or tool-result content.
+type ExportProviderCall struct {
+	StartedAt               time.Time             `json:"started_at,omitzero"`
+	CompletedAt             time.Time             `json:"completed_at,omitzero"`
+	ID                      string                `json:"id"`
+	Source                  string                `json:"source,omitempty"`
+	Provider                string                `json:"provider,omitempty"`
+	RequestedModel          string                `json:"requested_model,omitempty"`
+	ResponseModel           string                `json:"response_model,omitempty"`
+	ModelMode               string                `json:"model_mode,omitempty"`
+	ReasoningLevel          string                `json:"reasoning_level,omitempty"`
+	PromptHash              string                `json:"prompt_hash,omitempty"`
+	ConfigHash              string                `json:"config_hash,omitempty"`
+	ResponseHash            string                `json:"response_hash,omitempty"`
+	StopReason              llm.StopReason        `json:"stop_reason,omitempty"`
+	RequestMessages         []ExportMessage       `json:"request_messages,omitempty"`
+	FallbackModels          []string              `json:"fallback_models,omitempty"`
+	ReferencedFiles         []ExportFileReference `json:"referenced_files,omitempty"`
+	InputTokens             int                   `json:"input_tokens,omitempty"`
+	CachedInputTokens       int                   `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens   int                   `json:"cache_write_input_tokens,omitempty"`
+	OutputTokens            int                   `json:"output_tokens,omitempty"`
+	TotalTokens             int                   `json:"total_tokens,omitempty"`
+	EstimatedInputTokens    int                   `json:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens   int                   `json:"estimated_output_tokens,omitempty"`
+	MaxOutputTokens         int                   `json:"max_output_tokens,omitempty"`
+	RequestMessageCount     int                   `json:"request_message_count,omitempty"`
+	RequestToolCount        int                   `json:"request_tool_count,omitempty"`
+	RequestToolCallCount    int                   `json:"request_tool_call_count,omitempty"`
+	RequestToolResultCount  int                   `json:"request_tool_result_count,omitempty"`
+	ResponseToolCallCount   int                   `json:"response_tool_call_count,omitempty"`
+	DurationMillis          int64                 `json:"duration_millis,omitempty"`
+	FirstTokenLatencyMillis int64                 `json:"first_token_latency_millis,omitempty"`
+}
+
+// ExportFileReference records a file or artifact path that influenced replay.
+//
+//nolint:govet // JSON field order keeps path identity before provenance metadata.
+type ExportFileReference struct {
+	Path            string `json:"path"`
+	LogicalPath     string `json:"logical_path,omitempty"`
+	Kind            string `json:"kind,omitempty"`
+	Source          string `json:"source,omitempty"`
+	SourceAgent     string `json:"source_agent,omitempty"`
+	SourceSessionID string `json:"source_session_id,omitempty"`
+	SHA256          string `json:"sha256,omitempty"`
+	SizeBytes       int64  `json:"size_bytes,omitempty"`
+	WorktreeBranch  string `json:"worktree_branch,omitempty"`
+	WorktreeBase    string `json:"worktree_base,omitempty"`
+}
+
+// ExportVerificationGate records a replay-affecting gate decision.
+type ExportVerificationGate struct {
+	RunID  string `json:"run_id,omitempty"`
+	Name   string `json:"name"`
+	Phase  string `json:"phase,omitempty"`
+	Agent  string `json:"agent,omitempty"`
+	Notes  string `json:"notes,omitempty"`
+	Passed bool   `json:"passed"`
 }
 
 // ExportMessage is a redaction-aware exported transcript message.
@@ -464,7 +572,10 @@ func BuildMachineReadableExport(session Session, options ExportOptions) MachineR
 			EvaluationCount:        len(session.Evaluations),
 			ArtifactCount:          len(session.Artifacts),
 			MultiAgentRunCount:     len(session.MultiAgentRuns),
+			SchemaVersion:          normalizedSessionSchemaVersion(session.SchemaVersion),
+			EventSchemaVersion:     SessionEventSchemaVersion,
 		},
+		Provenance: builder.exportProvenance(session),
 	}
 
 	export.NegativeKnowledge = builder.exportNegativeKnowledge(session.NegativeKnowledge)
@@ -1011,6 +1122,260 @@ func (builder *exportBuilder) exportMultiAgentRunDecisions(prefix string, decisi
 	return exported
 }
 
+func (builder *exportBuilder) exportProvenance(sessionState Session) ExportProvenance {
+	provenance := ExportProvenance{
+		ConfigHash:        sessionConfigHash(sessionState),
+		Providers:         builder.sanitizeSlice("provenance.providers", sessionProviders(sessionState)),
+		Models:            builder.sanitizeSlice("session.default_model", sessionModels(sessionState)),
+		TokenUsage:        sessionTokenUsage(sessionState),
+		ProviderCalls:     builder.exportProviderCalls(sessionState.ProviderCalls),
+		ReferencedFiles:   builder.exportFileReferences(sessionFileReferences(sessionState)),
+		VerificationGates: builder.exportVerificationGates(sessionVerificationGates(sessionState)),
+	}
+
+	if sessionState.EventLog != nil {
+		provenance.EventLog = &ExportEventLogProvenance{
+			Path:          builder.sanitize("provenance.event_log.path", sessionState.EventLog.Path),
+			LastHash:      builder.sanitize("provenance.event_log.last_hash", sessionState.EventLog.LastHash),
+			SchemaVersion: sessionState.EventLog.SchemaVersion,
+			EventCount:    sessionState.EventLog.EventCount,
+			LastSequence:  sessionState.EventLog.LastSequence,
+			TruncatedTail: sessionState.EventLog.TruncatedTail,
+		}
+	}
+
+	return provenance
+}
+
+func (builder *exportBuilder) exportProviderCalls(calls []ProviderCall) []ExportProviderCall {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	out := make([]ExportProviderCall, 0, len(calls))
+	for index := range calls {
+		call := exportProviderCallProjection(calls[index])
+		if !providerCallHasEvidence(call) {
+			continue
+		}
+
+		prefix := fmt.Sprintf("provenance.provider_calls[%d]", len(out)+1)
+		requestToolCallCount, requestToolResultCount := requestToolEventCounts(call.RequestMessages)
+		exported := ExportProviderCall{
+			StartedAt:               builder.exportTime(prefix+".started_at", call.StartedAt),
+			CompletedAt:             builder.exportTime(prefix+".completed_at", call.CompletedAt),
+			ID:                      builder.sanitize(prefix+".id", call.ID),
+			Source:                  builder.sanitize(prefix+".source", call.Source),
+			Provider:                builder.sanitize(prefix+".provider", call.Provider),
+			RequestedModel:          builder.sanitize(prefix+".requested_model", call.RequestedModel),
+			ResponseModel:           builder.sanitize(prefix+".response_model", call.ResponseModel),
+			ModelMode:               builder.sanitize(prefix+".model_mode", call.ModelMode),
+			ReasoningLevel:          builder.sanitize(prefix+".reasoning_level", call.ReasoningLevel),
+			PromptHash:              builder.sanitize(prefix+".prompt_hash", call.PromptHash),
+			ConfigHash:              builder.sanitize(prefix+".config_hash", call.ConfigHash),
+			ResponseHash:            builder.sanitize(prefix+".response_hash", call.ResponseHash),
+			StopReason:              call.StopReason,
+			RequestMessages:         builder.exportProviderCallRequestMessages(prefix, call.RequestMessages),
+			FallbackModels:          builder.sanitizeSlice(prefix+".fallback_models", call.FallbackModels),
+			ReferencedFiles:         builder.exportFileReferencesForPrefix(prefix+".referenced_files", fileReferencesFromProviderCall(call)),
+			InputTokens:             call.InputTokens,
+			CachedInputTokens:       call.CachedInputTokens,
+			CacheWriteInputTokens:   call.CacheWriteInputTokens,
+			OutputTokens:            call.OutputTokens,
+			TotalTokens:             call.TotalTokens,
+			EstimatedInputTokens:    call.EstimatedInputTokens,
+			EstimatedOutputTokens:   call.EstimatedOutputTokens,
+			MaxOutputTokens:         call.MaxOutputTokens,
+			RequestMessageCount:     call.RequestMessageCount,
+			RequestToolCount:        call.RequestToolCount,
+			RequestToolCallCount:    requestToolCallCount,
+			RequestToolResultCount:  requestToolResultCount,
+			ResponseToolCallCount:   call.ResponseToolCallCount,
+			DurationMillis:          call.DurationMillis,
+			FirstTokenLatencyMillis: call.FirstTokenLatencyMillis,
+		}
+
+		out = append(out, exported)
+	}
+
+	return out
+}
+
+func exportProviderCallProjection(call ProviderCall) ProviderCall {
+	if !call.StartedAt.IsZero() {
+		call.StartedAt = call.StartedAt.UTC()
+	}
+
+	if !call.CompletedAt.IsZero() {
+		call.CompletedAt = call.CompletedAt.UTC()
+	}
+
+	call.ID = strings.TrimSpace(call.ID)
+	call.Source = strings.TrimSpace(call.Source)
+	call.Provider = strings.TrimSpace(call.Provider)
+	call.RequestedModel = strings.TrimSpace(call.RequestedModel)
+	call.ResponseModel = strings.TrimSpace(call.ResponseModel)
+	call.ModelMode = strings.TrimSpace(call.ModelMode)
+	call.ReasoningLevel = strings.TrimSpace(call.ReasoningLevel)
+	call.PromptHash = strings.TrimSpace(call.PromptHash)
+	call.ConfigHash = strings.TrimSpace(call.ConfigHash)
+	call.ResponseHash = strings.TrimSpace(call.ResponseHash)
+
+	if call.Provider == "" {
+		call.Provider = providerFromModel(firstNonEmptyString(call.ResponseModel, call.RequestedModel))
+	}
+
+	if call.PromptHash == "" && len(call.RequestMessages) > 0 {
+		call.PromptHash = hashJSON(call.RequestMessages)
+	}
+
+	if call.RequestMessageCount == 0 {
+		call.RequestMessageCount = len(call.RequestMessages)
+	}
+
+	call.FallbackModels = compactStringSlice(call.FallbackModels)
+	call.ReferencedFiles = cloneFileReferences(call.ReferencedFiles)
+	call.RequestMessages = append([]llm.Message(nil), call.RequestMessages...)
+	call.InputTokens = max(call.InputTokens, 0)
+	call.CachedInputTokens = max(call.CachedInputTokens, 0)
+	call.CacheWriteInputTokens = max(call.CacheWriteInputTokens, 0)
+	call.OutputTokens = max(call.OutputTokens, 0)
+	call.TotalTokens = max(call.TotalTokens, 0)
+
+	if call.TotalTokens == 0 {
+		call.TotalTokens = call.InputTokens + call.OutputTokens
+	}
+
+	call.EstimatedInputTokens = max(call.EstimatedInputTokens, 0)
+	call.EstimatedOutputTokens = max(call.EstimatedOutputTokens, 0)
+	call.MaxOutputTokens = max(call.MaxOutputTokens, 0)
+	call.RequestToolCount = max(call.RequestToolCount, 0)
+	call.ResponseToolCallCount = max(call.ResponseToolCallCount, 0)
+	call.DurationMillis = nonNegativeInt64(call.DurationMillis)
+	call.FirstTokenLatencyMillis = nonNegativeInt64(call.FirstTokenLatencyMillis)
+
+	return call
+}
+
+func (builder *exportBuilder) exportProviderCallRequestMessages(prefix string, messages []llm.Message) []ExportMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	if !builder.exportsRawAttachments() {
+		builder.omit(prefix + ".request_messages omitted by non-private export profile")
+
+		return nil
+	}
+
+	out := make([]ExportMessage, 0, len(messages))
+	for index := range messages {
+		message := messages[index]
+		messagePrefix := fmt.Sprintf("%s.request_messages[%d]", prefix, index+1)
+		exported := ExportMessage{
+			Index:   index + 1,
+			Role:    message.Role,
+			Content: builder.exportString(messagePrefix+".content", SearchFieldTranscript, message.Content),
+		}
+
+		if len(message.ToolCalls) > 0 {
+			exported.ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+		}
+
+		if message.ToolResult != nil {
+			result := *message.ToolResult
+			exported.ToolResult = &result
+		}
+
+		out = append(out, exported)
+	}
+
+	return out
+}
+
+func requestToolEventCounts(messages []llm.Message) (toolCalls, toolResults int) {
+	for index := range messages {
+		message := &messages[index]
+		toolCalls += len(message.ToolCalls)
+
+		if message.ToolResult != nil {
+			toolResults++
+		}
+	}
+
+	return toolCalls, toolResults
+}
+
+func fileReferencesFromProviderCall(call ProviderCall) []ExportFileReference {
+	if len(call.ReferencedFiles) == 0 {
+		return nil
+	}
+
+	refs := make([]ExportFileReference, 0, len(call.ReferencedFiles))
+	for index := range call.ReferencedFiles {
+		refs = append(refs, exportFileReferenceFromSessionReference(call.ReferencedFiles[index]))
+	}
+
+	return refs
+}
+
+func (builder *exportBuilder) exportFileReferences(entries []ExportFileReference) []ExportFileReference {
+	return builder.exportFileReferencesForPrefix("provenance.referenced_files", entries)
+}
+
+func (builder *exportBuilder) exportFileReferencesForPrefix(prefix string, entries []ExportFileReference) []ExportFileReference {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	if builder.excludes(SearchFieldArtifacts) {
+		builder.omit("provenance file references omitted by export field policy")
+
+		return nil
+	}
+
+	out := make([]ExportFileReference, 0, len(entries))
+	for index := range entries {
+		entry := &entries[index]
+		entryPrefix := fmt.Sprintf("%s[%d]", prefix, index+1)
+		out = append(out, ExportFileReference{
+			Path:            builder.sanitize(entryPrefix+".path", entry.Path),
+			LogicalPath:     builder.sanitize(entryPrefix+".logical_path", entry.LogicalPath),
+			Kind:            builder.sanitize(entryPrefix+".kind", entry.Kind),
+			Source:          builder.sanitize(entryPrefix+".source", entry.Source),
+			SourceAgent:     builder.sanitize(entryPrefix+".source_agent", entry.SourceAgent),
+			SourceSessionID: builder.sanitize(entryPrefix+".source_session_id", entry.SourceSessionID),
+			SHA256:          builder.sanitize(entryPrefix+".sha256", entry.SHA256),
+			SizeBytes:       entry.SizeBytes,
+			WorktreeBranch:  builder.sanitize(entryPrefix+".worktree_branch", entry.WorktreeBranch),
+			WorktreeBase:    builder.sanitize(entryPrefix+".worktree_base", entry.WorktreeBase),
+		})
+	}
+
+	return out
+}
+
+func (builder *exportBuilder) exportVerificationGates(entries []ExportVerificationGate) []ExportVerificationGate {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	out := make([]ExportVerificationGate, 0, len(entries))
+	for index, entry := range entries {
+		prefix := fmt.Sprintf("provenance.verification_gates[%d]", index+1)
+		out = append(out, ExportVerificationGate{
+			RunID:  builder.sanitize(prefix+".run_id", entry.RunID),
+			Name:   builder.sanitize(prefix+".name", entry.Name),
+			Phase:  builder.sanitize(prefix+".phase", entry.Phase),
+			Agent:  builder.sanitize(prefix+".agent", entry.Agent),
+			Notes:  builder.sanitize(prefix+".notes", entry.Notes),
+			Passed: entry.Passed,
+		})
+	}
+
+	return out
+}
+
 func (builder *exportBuilder) exportMessages(messages []llm.Message) []ExportMessage {
 	if len(messages) == 0 {
 		return nil
@@ -1308,6 +1673,7 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeMetadataString(&b, "Tags", strings.Join(export.Session.Tags, ", "))
 
 	writeManifest(&b, export.Manifest)
+	writeProvenance(&b, export.Provenance)
 
 	if export.Manifest.RedactionProfile == ExportProfileIssue {
 		writeIssueSummary(&b, export)
@@ -1321,6 +1687,192 @@ func renderMarkdown(export MachineReadableExport) string {
 	writeTranscript(&b, export)
 
 	return b.String()
+}
+
+//nolint:gocognit // Markdown provenance rendering mirrors the exported provenance sections.
+func writeProvenance(b *strings.Builder, provenance ExportProvenance) {
+	b.WriteString("\n## Provenance\n\n")
+	writeMetadataString(b, "Config hash", provenance.ConfigHash)
+	writeMetadataString(b, "Providers", strings.Join(provenance.Providers, ", "))
+	writeMetadataString(b, "Models", strings.Join(provenance.Models, ", "))
+
+	writeProvenanceEventLog(b, provenance.EventLog)
+
+	writeProvenanceTokenUsage(b, provenance.TokenUsage)
+	writeProvenanceProviderCalls(b, provenance.ProviderCalls)
+
+	if len(provenance.ReferencedFiles) > 0 {
+		b.WriteString("- **Referenced files:**\n")
+
+		for index := range provenance.ReferencedFiles {
+			file := &provenance.ReferencedFiles[index]
+
+			parts := []string{markdownInline(file.Path)}
+			if file.Kind != "" {
+				parts = append(parts, "kind="+markdownInline(file.Kind))
+			}
+
+			if file.Source != "" {
+				parts = append(parts, "source="+markdownInline(file.Source))
+			}
+
+			if file.SHA256 != "" {
+				parts = append(parts, "sha256="+markdownInline(file.SHA256))
+			}
+
+			fmt.Fprintf(b, "  - %s\n", strings.Join(parts, " "))
+		}
+	}
+
+	if len(provenance.VerificationGates) > 0 {
+		b.WriteString("- **Verification gates:**\n")
+
+		for _, gate := range provenance.VerificationGates {
+			status := "fail"
+			if gate.Passed {
+				status = "pass"
+			}
+
+			parts := []string{markdownInline(gate.Name), "status=" + status}
+			if gate.RunID != "" {
+				parts = append(parts, "run="+markdownInline(gate.RunID))
+			}
+
+			if gate.Phase != "" {
+				parts = append(parts, "phase="+markdownInline(gate.Phase))
+			}
+
+			if gate.Agent != "" {
+				parts = append(parts, "agent="+markdownInline(gate.Agent))
+			}
+
+			fmt.Fprintf(b, "  - %s\n", strings.Join(parts, " "))
+		}
+	}
+}
+
+func writeProvenanceEventLog(b *strings.Builder, eventLog *ExportEventLogProvenance) {
+	if eventLog == nil {
+		return
+	}
+
+	writeMetadataString(b, "Event log", eventLog.Path)
+	writeMetadataString(b, "Event log hash", eventLog.LastHash)
+
+	if eventLog.SchemaVersion > 0 {
+		fmt.Fprintf(b, "- **Event schema:** %d\n", eventLog.SchemaVersion)
+	}
+
+	if eventLog.EventCount > 0 {
+		fmt.Fprintf(b, "- **Event count:** %d\n", eventLog.EventCount)
+	}
+
+	if eventLog.LastSequence > 0 {
+		fmt.Fprintf(b, "- **Event last sequence:** %d\n", eventLog.LastSequence)
+	}
+
+	if eventLog.TruncatedTail {
+		b.WriteString("- **Event log warning:** truncated tail ignored during replay\n")
+	}
+}
+
+func writeProvenanceProviderCalls(b *strings.Builder, calls []ExportProviderCall) {
+	if len(calls) == 0 {
+		return
+	}
+
+	b.WriteString("- **Provider calls:**\n")
+
+	for index := range calls {
+		call := &calls[index]
+		parts := providerCallMarkdownParts(call)
+
+		if len(parts) == 0 {
+			continue
+		}
+
+		fmt.Fprintf(b, "  - %s\n", strings.Join(parts, " "))
+	}
+}
+
+func providerCallMarkdownParts(call *ExportProviderCall) []string {
+	parts := []string{}
+
+	if call.ID != "" {
+		parts = append(parts, "id="+markdownInline(call.ID))
+	}
+
+	if call.Source != "" {
+		parts = append(parts, "source="+markdownInline(call.Source))
+	}
+
+	if call.Provider != "" {
+		parts = append(parts, "provider="+markdownInline(call.Provider))
+	}
+
+	if call.RequestedModel != "" {
+		parts = append(parts, "requested_model="+markdownInline(call.RequestedModel))
+	}
+
+	if call.ResponseModel != "" {
+		parts = append(parts, "response_model="+markdownInline(call.ResponseModel))
+	}
+
+	if call.PromptHash != "" {
+		parts = append(parts, "prompt_hash="+markdownInline(call.PromptHash))
+	}
+
+	if call.ConfigHash != "" {
+		parts = append(parts, "config_hash="+markdownInline(call.ConfigHash))
+	}
+
+	if call.TotalTokens > 0 {
+		parts = append(parts, "total_tokens="+strconv.Itoa(call.TotalTokens))
+	}
+
+	if call.RequestToolCallCount > 0 || call.RequestToolResultCount > 0 {
+		parts = append(
+			parts,
+			"tool_calls="+strconv.Itoa(call.RequestToolCallCount),
+			"tool_results="+strconv.Itoa(call.RequestToolResultCount),
+		)
+	}
+
+	if len(call.ReferencedFiles) > 0 {
+		parts = append(parts, "files="+strconv.Itoa(len(call.ReferencedFiles)))
+	}
+
+	return parts
+}
+
+func writeProvenanceTokenUsage(b *strings.Builder, usage ExportTokenUsage) {
+	if usage.ModelCalls == 0 &&
+		usage.InputTokens == 0 &&
+		usage.CachedInputTokens == 0 &&
+		usage.CacheWriteInputTokens == 0 &&
+		usage.OutputTokens == 0 &&
+		usage.TotalTokens == 0 &&
+		usage.EstimatedInputTokens == 0 &&
+		usage.EstimatedOutputTokens == 0 &&
+		usage.EstimatedTotalTokens == 0 &&
+		usage.EstimatedCostMicros == 0 {
+		return
+	}
+
+	fmt.Fprintf(
+		b,
+		"- **Token usage:** model_calls=%d input=%d cached_input=%d cache_write_input=%d output=%d total=%d estimated_input=%d estimated_output=%d estimated_total=%d estimated_cost_micros=%d\n",
+		usage.ModelCalls,
+		usage.InputTokens,
+		usage.CachedInputTokens,
+		usage.CacheWriteInputTokens,
+		usage.OutputTokens,
+		usage.TotalTokens,
+		usage.EstimatedInputTokens,
+		usage.EstimatedOutputTokens,
+		usage.EstimatedTotalTokens,
+		usage.EstimatedCostMicros,
+	)
 }
 
 func writeManifest(b *strings.Builder, manifest ExportManifest) {
@@ -2200,6 +2752,10 @@ func exportContentHashes(export MachineReadableExport) map[string]string {
 		"session": hashJSON(export.Session),
 	}
 
+	if export.Provenance.ConfigHash != "" {
+		hashes["provenance"] = hashJSON(export.Provenance)
+	}
+
 	if len(export.Messages) > 0 {
 		hashes["messages"] = hashJSON(export.Messages)
 	}
@@ -2221,6 +2777,365 @@ func exportContentHashes(export MachineReadableExport) map[string]string {
 	}
 
 	return hashes
+}
+
+func normalizedSessionSchemaVersion(version int) int {
+	if version == 0 {
+		return SessionSchemaVersion
+	}
+
+	return version
+}
+
+func sessionConfigHash(sessionState Session) string {
+	//nolint:govet // Hash field order is stable and human-readable in tests.
+	config := struct {
+		AgentLoopBudget       llm.AgentLoopBudget `json:"agent_loop_budget,omitzero"`
+		Autonomy              string              `json:"autonomy,omitempty"`
+		DefaultAgent          string              `json:"default_agent,omitempty"`
+		DefaultModel          string              `json:"default_model,omitempty"`
+		DefaultModelMode      string              `json:"default_model_mode,omitempty"`
+		DefaultReasoningLevel string              `json:"default_reasoning_level,omitempty"`
+		PromptSuggestions     string              `json:"prompt_suggestions,omitempty"`
+		Tags                  []string            `json:"tags,omitempty"`
+		WorktreeBase          string              `json:"worktree_base,omitempty"`
+		WorktreeBranch        string              `json:"worktree_branch,omitempty"`
+		WorktreePath          string              `json:"worktree_path,omitempty"`
+	}{
+		AgentLoopBudget:       sessionState.AgentLoopBudget,
+		Autonomy:              sessionState.Autonomy,
+		DefaultAgent:          sessionState.DefaultAgent,
+		DefaultModel:          sessionState.DefaultModel,
+		DefaultModelMode:      sessionState.DefaultModelMode,
+		DefaultReasoningLevel: sessionState.DefaultReasoningLevel,
+		PromptSuggestions:     sessionState.PromptSuggestions,
+		Tags:                  append([]string(nil), sessionState.Tags...),
+		WorktreeBase:          sessionState.WorktreeBase,
+		WorktreeBranch:        sessionState.WorktreeBranch,
+		WorktreePath:          sessionState.WorktreePath,
+	}
+
+	return hashJSON(config)
+}
+
+func sessionProviders(sessionState Session) []string {
+	values := []string{
+		providerFromModel(sessionState.DefaultModel),
+	}
+
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		values = append(
+			values,
+			call.Provider,
+			providerFromModel(call.RequestedModel),
+			providerFromModel(call.ResponseModel),
+		)
+	}
+
+	if sessionState.BackgroundSuggestions != nil {
+		values = append(values, sessionState.BackgroundSuggestions.LastProvider)
+	}
+
+	for index := range sessionState.Evaluations {
+		evaluation := &sessionState.Evaluations[index]
+		values = append(values, evaluation.Provider, providerFromModel(evaluation.Model))
+	}
+
+	for runIndex := range sessionState.MultiAgentRuns {
+		run := &sessionState.MultiAgentRuns[runIndex]
+		values = append(values, providerFromModel(run.Model))
+
+		for callIndex := range run.Calls {
+			call := &run.Calls[callIndex]
+			values = append(values, providerFromModel(call.RequestedModel), providerFromModel(call.ResponseModel))
+		}
+
+		for branchIndex := range run.Branches {
+			branch := &run.Branches[branchIndex]
+			values = append(values, providerFromModel(branch.Model))
+		}
+
+		for _, reviewer := range run.Reviewers {
+			values = append(values, providerFromModel(reviewer.Model))
+		}
+	}
+
+	return uniqueSortedStrings(values)
+}
+
+func sessionModels(sessionState Session) []string {
+	values := []string{sessionState.DefaultModel}
+
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		values = append(values, call.RequestedModel, call.ResponseModel)
+		values = append(values, call.FallbackModels...)
+	}
+
+	if sessionState.BackgroundSuggestions != nil {
+		values = append(values, sessionState.BackgroundSuggestions.LastModel)
+	}
+
+	for index := range sessionState.Evaluations {
+		values = append(values, sessionState.Evaluations[index].Model)
+	}
+
+	for runIndex := range sessionState.MultiAgentRuns {
+		run := &sessionState.MultiAgentRuns[runIndex]
+		values = append(values, run.Model)
+		values = append(values, run.FallbackModels...)
+
+		for callIndex := range run.Calls {
+			call := &run.Calls[callIndex]
+			values = append(values, call.RequestedModel, call.ResponseModel)
+			values = append(values, call.FallbackModels...)
+		}
+
+		for branchIndex := range run.Branches {
+			branch := &run.Branches[branchIndex]
+			values = append(values, branch.Model)
+		}
+
+		for _, reviewer := range run.Reviewers {
+			values = append(values, reviewer.Model)
+		}
+	}
+
+	return uniqueSortedStrings(values)
+}
+
+func sessionTokenUsage(sessionState Session) ExportTokenUsage {
+	var usage ExportTokenUsage
+
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		usage.ModelCalls++
+		usage.InputTokens += call.InputTokens
+		usage.CachedInputTokens += call.CachedInputTokens
+		usage.CacheWriteInputTokens += call.CacheWriteInputTokens
+		usage.OutputTokens += call.OutputTokens
+		usage.TotalTokens += call.TotalTokens
+		usage.EstimatedInputTokens += call.EstimatedInputTokens
+		usage.EstimatedOutputTokens += call.EstimatedOutputTokens
+	}
+
+	if sessionState.BackgroundSuggestions != nil {
+		usage.ModelCalls += sessionState.BackgroundSuggestions.ProviderCalls
+		usage.InputTokens += sessionState.BackgroundSuggestions.InputTokens
+		usage.CachedInputTokens += sessionState.BackgroundSuggestions.CachedInputTokens
+		usage.CacheWriteInputTokens += sessionState.BackgroundSuggestions.CacheWriteInputTokens
+		usage.OutputTokens += sessionState.BackgroundSuggestions.OutputTokens
+		usage.EstimatedInputTokens += sessionState.BackgroundSuggestions.EstimatedInputTokens
+		usage.EstimatedOutputTokens += sessionState.BackgroundSuggestions.EstimatedOutputTokens
+	}
+
+	for index := range sessionState.Evaluations {
+		evaluation := &sessionState.Evaluations[index]
+		usage.InputTokens += evaluation.InputTokens
+		usage.OutputTokens += evaluation.OutputTokens
+		usage.TotalTokens += evaluation.TotalTokens
+	}
+
+	for runIndex := range sessionState.MultiAgentRuns {
+		run := &sessionState.MultiAgentRuns[runIndex]
+		usage = addRunTokenUsage(usage, *run)
+	}
+
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	}
+
+	if usage.EstimatedTotalTokens == 0 {
+		usage.EstimatedTotalTokens = usage.EstimatedInputTokens + usage.EstimatedOutputTokens
+	}
+
+	return usage
+}
+
+func addRunTokenUsage(total ExportTokenUsage, run MultiAgentRun) ExportTokenUsage {
+	calls := providerCallTokenUsage(run.Calls)
+
+	total.ModelCalls += preferRecordedInt(run.Usage.ModelCalls, calls.ModelCalls)
+	total.InputTokens += preferRecordedInt(run.Usage.InputTokens, calls.InputTokens)
+	total.CachedInputTokens += preferRecordedInt(run.Usage.CachedInputTokens, calls.CachedInputTokens)
+	total.OutputTokens += preferRecordedInt(run.Usage.OutputTokens, calls.OutputTokens)
+	total.TotalTokens += preferRecordedInt(run.Usage.TotalTokens, calls.TotalTokens)
+	total.EstimatedInputTokens += run.Usage.EstimatedInputTokens
+	total.EstimatedOutputTokens += run.Usage.EstimatedOutputTokens
+	total.EstimatedTotalTokens += run.Usage.EstimatedTotalTokens
+	total.EstimatedCostMicros += preferRecordedInt64(run.Usage.EstimatedCostMicros, calls.EstimatedCostMicros)
+
+	return total
+}
+
+func providerCallTokenUsage(calls []MultiAgentRunCall) ExportTokenUsage {
+	var usage ExportTokenUsage
+
+	for index := range calls {
+		call := &calls[index]
+		usage.ModelCalls++
+		usage.InputTokens += call.InputTokens
+		usage.CachedInputTokens += call.CachedInputTokens
+		usage.OutputTokens += call.OutputTokens
+		usage.TotalTokens += call.TotalTokens
+		usage.EstimatedCostMicros += call.EstimatedCostMicros
+	}
+
+	return usage
+}
+
+func preferRecordedInt(recorded, fallback int) int {
+	if recorded != 0 {
+		return recorded
+	}
+
+	return fallback
+}
+
+func preferRecordedInt64(recorded, fallback int64) int64 {
+	if recorded != 0 {
+		return recorded
+	}
+
+	return fallback
+}
+
+func sessionFileReferences(sessionState Session) []ExportFileReference {
+	entries := make([]ExportFileReference, 0, len(sessionState.Artifacts)+len(sessionState.Evaluations)+1)
+
+	if strings.TrimSpace(sessionState.WorktreePath) != "" {
+		entries = append(entries, ExportFileReference{
+			Path:           sessionState.WorktreePath,
+			Kind:           "worktree",
+			Source:         "session.worktree",
+			WorktreeBranch: sessionState.WorktreeBranch,
+			WorktreeBase:   sessionState.WorktreeBase,
+		})
+	}
+
+	for callIndex := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[callIndex]
+		for refIndex := range call.ReferencedFiles {
+			entries = append(entries, exportFileReferenceFromSessionReference(call.ReferencedFiles[refIndex]))
+		}
+	}
+
+	for index := range sessionState.Artifacts {
+		artifact := &sessionState.Artifacts[index]
+		if strings.TrimSpace(artifact.Path) == "" {
+			continue
+		}
+
+		entries = append(entries, ExportFileReference{
+			Path:            artifact.Path,
+			LogicalPath:     artifact.LogicalPath,
+			Kind:            artifact.Kind,
+			Source:          "artifact",
+			SourceAgent:     artifact.SourceAgent,
+			SourceSessionID: artifact.SourceSessionID,
+			SHA256:          artifact.SHA256,
+			SizeBytes:       artifact.SizeBytes,
+			WorktreeBranch:  artifact.WorktreeBranch,
+			WorktreeBase:    artifact.WorktreeBase,
+		})
+	}
+
+	for index := range sessionState.Evaluations {
+		evaluation := &sessionState.Evaluations[index]
+		if strings.TrimSpace(evaluation.Reference) == "" {
+			continue
+		}
+
+		entries = append(entries, ExportFileReference{
+			Path:        evaluation.Reference,
+			Kind:        "evaluation",
+			Source:      "evaluation.reference",
+			SourceAgent: evaluation.Agent,
+		})
+	}
+
+	return uniqueFileReferences(entries)
+}
+
+func exportFileReferenceFromSessionReference(ref FileReference) ExportFileReference {
+	return ExportFileReference(ref)
+}
+
+func sessionVerificationGates(sessionState Session) []ExportVerificationGate {
+	var gates []ExportVerificationGate
+
+	for runIndex := range sessionState.MultiAgentRuns {
+		run := &sessionState.MultiAgentRuns[runIndex]
+
+		for _, gate := range run.Gates {
+			gates = append(gates, ExportVerificationGate{
+				RunID:  run.ID,
+				Name:   gate.Name,
+				Phase:  gate.Phase,
+				Agent:  gate.Agent,
+				Notes:  gate.Notes,
+				Passed: gate.Passed,
+			})
+		}
+	}
+
+	return gates
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]string, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = value
+	}
+
+	out := make([]string, 0, len(seen))
+	for _, value := range seen {
+		out = append(out, value)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
+
+	return out
+}
+
+func uniqueFileReferences(entries []ExportFileReference) []ExportFileReference {
+	seen := make(map[string]struct{}, len(entries))
+	out := make([]ExportFileReference, 0, len(entries))
+
+	for index := range entries {
+		entry := &entries[index]
+
+		key := strings.Join([]string{
+			entry.Path,
+			entry.LogicalPath,
+			entry.Kind,
+			entry.Source,
+			entry.SourceAgent,
+			entry.SHA256,
+		}, "\x00")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+
+		seen[key] = struct{}{}
+
+		out = append(out, *entry)
+	}
+
+	return out
 }
 
 func hashJSON(value any) string {

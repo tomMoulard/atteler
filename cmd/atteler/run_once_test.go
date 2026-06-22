@@ -70,6 +70,105 @@ func (p runOnceCapabilityProvider) Capabilities() llm.ProviderCapabilities {
 	return p.capabilities
 }
 
+type runOnceSequenceProvider struct {
+	name      string
+	model     string
+	responses []*llm.Response
+	requests  []llm.CompleteParams
+}
+
+func (p *runOnceSequenceProvider) Name() string { return p.name }
+
+func (p *runOnceSequenceProvider) Models() []string { return []string{p.model} }
+
+func (p *runOnceSequenceProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *runOnceSequenceProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *runOnceSequenceProvider) ModelContextWindow(string) int { return 128_000 }
+
+func (p *runOnceSequenceProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	p.requests = append(p.requests, params)
+	if len(p.responses) == 0 {
+		return nil, errors.New("missing response")
+	}
+
+	resp := p.responses[0]
+	p.responses = append([]*llm.Response(nil), p.responses[1:]...)
+
+	return resp, nil
+}
+
+func TestRunOnceCompleteWithAutonomyTranscriptReturnsToolMessages(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceSequenceProvider{
+		name:  "openai",
+		model: "openai/gpt-test",
+		responses: []*llm.Response{
+			{
+				Content: "need file",
+				Model:   "openai/gpt-test",
+				ToolCalls: []llm.ToolCall{{
+					ID:    "tool-1",
+					Name:  llm.ToolNameBash,
+					Input: map[string]any{"command": "printf tool-output"},
+				}},
+				StopReason: llm.StopToolUse,
+			},
+			{
+				Content:      "done",
+				Model:        "openai/gpt-test",
+				StopReason:   llm.StopEndTurn,
+				InputTokens:  3,
+				OutputTokens: 2,
+			},
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	resp, messages, replayReferences, err := runOnceCompleteWithAutonomyTranscript(
+		context.Background(),
+		reg,
+		llm.CompleteParams{
+			Model:    "openai/gpt-test",
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "use a tool"}},
+			Tools:    []llm.ToolDefinition{{Name: llm.ToolNameBash}},
+		},
+		nil,
+		llm.AgentLoopBudget{MaxModelCalls: 3, MaxToolCalls: 2},
+		autonomy.Full,
+		0,
+		responseRecordOptions{},
+		nil,
+		false,
+		"",
+		nil,
+		attshell.AuditContext{Caller: "test"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "done", resp.Content)
+	assert.Empty(t, replayReferences)
+	require.Len(t, provider.requests, 2)
+	require.NotEmpty(t, messages)
+
+	var sawToolCall, sawToolResult bool
+
+	for index := range messages {
+		message := &messages[index]
+		sawToolCall = sawToolCall || len(message.ToolCalls) > 0
+		sawToolResult = sawToolResult || message.ToolResult != nil
+	}
+
+	assert.True(t, sawToolCall)
+	assert.True(t, sawToolResult)
+	assert.Greater(t, len(provider.requests[1].Messages), len(provider.requests[0].Messages))
+}
+
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -129,6 +228,16 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	if len(loaded.Messages) != 2 || loaded.Messages[1].Content != "recorded answer" {
 		require.Failf(t, "unexpected replayed session", "messages = %+v", loaded.Messages)
 	}
+
+	require.Len(t, loaded.ProviderCalls, 1)
+	require.Len(t, loaded.ProviderCalls[0].ReferencedFiles, 1)
+	replayRef := loaded.ProviderCalls[0].ReferencedFiles[0]
+	assert.Equal(t, replayPath, replayRef.Path)
+	assert.Equal(t, filepath.Base(replayPath), replayRef.LogicalPath)
+	assert.Equal(t, "response_fixture", replayRef.Kind)
+	assert.Equal(t, "replay_response", replayRef.Source)
+	assert.NotEmpty(t, replayRef.SHA256)
+	assert.Positive(t, replayRef.SizeBytes)
 }
 
 func TestSaveRecordedResponse_IncludesResponseFormat(t *testing.T) {
@@ -2347,6 +2456,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 
 	store := session.NewStore(filepath.Join(dir, "sessions"))
 	headlessID := "test-headless-inline-manifest"
+	sessionState := session.New("", nil)
 
 	var eventLog bytes.Buffer
 
@@ -2356,7 +2466,7 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 		agent.NewRegistry(nil),
 		events.NewRunnerWithLogger(nil, &eventLog),
 		store,
-		session.New("", nil),
+		sessionState,
 		contextref.Options{Root: dir},
 		"",
 		contextref.ReferenceManifest{},
@@ -2402,6 +2512,13 @@ func TestRunOnceWithOptions_HeadlessManifestIncludesInlineReferenceAudit(t *test
 	assert.Positive(t, manifest.InlineReferences[0].TokenEstimate.UpperBoundTokens)
 	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "provider=fallback")
 	assert.Contains(t, manifest.InlineReferences[0].TokenEstimator, "model=tiny")
+
+	saved, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, saved.ProviderCalls, 1)
+	require.NotEmpty(t, saved.ProviderCalls[0].ReferencedFiles)
+	assert.Equal(t, "docs/guide.md", saved.ProviderCalls[0].ReferencedFiles[0].LogicalPath)
+	assert.Contains(t, saved.ProviderCalls[0].ReferencedFiles[0].Path, filepath.Join("docs", "guide.md"))
 }
 
 func TestRunOnceWithOptions_HeadlessPrivateLogKeepsPrompt(t *testing.T) {

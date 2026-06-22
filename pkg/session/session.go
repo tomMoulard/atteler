@@ -23,6 +23,12 @@ const (
 
 	sessionFileExt = ".json"
 
+	// SessionSchemaVersion is the current projected JSON session schema.
+	SessionSchemaVersion = 2
+
+	// SessionEventSchemaVersion is the current append-only event schema.
+	SessionEventSchemaVersion = 1
+
 	// AgentEvaluationSchemaVersion is the current persisted evaluation metadata schema.
 	AgentEvaluationSchemaVersion = 2
 
@@ -45,6 +51,7 @@ const (
 type Session struct {
 	CreatedAt             time.Time           `json:"created_at"`
 	UpdatedAt             time.Time           `json:"updated_at"`
+	EventLog              *EventLogMetadata   `json:"event_log,omitempty" yaml:"event_log,omitempty"`
 	ID                    string              `json:"id"`
 	Title                 string              `json:"title,omitempty"`
 	DefaultModel          string              `json:"default_model,omitempty"`
@@ -62,11 +69,90 @@ type Session struct {
 	WorktreeBase          string                     `json:"worktree_base,omitempty"`
 	Tags                  []string                   `json:"tags,omitempty"`
 	Messages              []llm.Message              `json:"messages"`
+	ProviderCalls         []ProviderCall             `json:"provider_calls,omitempty" yaml:"provider_calls,omitempty"`
 	NegativeKnowledge     []NegativeKnowledge        `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
 	Evaluations           []AgentEvaluation          `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
 	Artifacts             []Artifact                 `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
 	MultiAgentRuns        []MultiAgentRun            `json:"multi_agent_runs,omitempty" yaml:"multi_agent_runs,omitempty"`
 	BackgroundSuggestions *BackgroundSuggestionUsage `json:"background_suggestions,omitempty" yaml:"background_suggestions,omitempty"`
+	SchemaVersion         int                        `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+}
+
+// EventLogMetadata describes the append-only audit log used to reconstruct a
+// session. It is included in JSON projections as a pointer back to the primary
+// record, not as the source of truth itself.
+type EventLogMetadata struct {
+	Path          string `json:"path,omitempty" yaml:"path,omitempty"`
+	LastHash      string `json:"last_hash,omitempty" yaml:"last_hash,omitempty"`
+	SchemaVersion int    `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+	EventCount    int    `json:"event_count,omitempty" yaml:"event_count,omitempty"`
+	LastSequence  int64  `json:"last_sequence,omitempty" yaml:"last_sequence,omitempty"`
+	TruncatedTail bool   `json:"truncated_tail,omitempty" yaml:"truncated_tail,omitempty"`
+}
+
+// ProviderCall records one LLM provider request/response pair that influenced
+// replay. RequestMessages are intentionally kept in the durable local record so
+// replay can reconstruct the exact prompt after reference-context injection.
+type ProviderCall struct {
+	StartedAt               time.Time       `json:"started_at,omitzero" yaml:"started_at,omitempty"`
+	CompletedAt             time.Time       `json:"completed_at,omitzero" yaml:"completed_at,omitempty"`
+	ID                      string          `json:"id" yaml:"id"`
+	Source                  string          `json:"source,omitempty" yaml:"source,omitempty"`
+	Provider                string          `json:"provider,omitempty" yaml:"provider,omitempty"`
+	RequestedModel          string          `json:"requested_model,omitempty" yaml:"requested_model,omitempty"`
+	ResponseModel           string          `json:"response_model,omitempty" yaml:"response_model,omitempty"`
+	ModelMode               string          `json:"model_mode,omitempty" yaml:"model_mode,omitempty"`
+	ReasoningLevel          string          `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	PromptHash              string          `json:"prompt_hash,omitempty" yaml:"prompt_hash,omitempty"`
+	ConfigHash              string          `json:"config_hash,omitempty" yaml:"config_hash,omitempty"`
+	ResponseHash            string          `json:"response_hash,omitempty" yaml:"response_hash,omitempty"`
+	StopReason              llm.StopReason  `json:"stop_reason,omitempty" yaml:"stop_reason,omitempty"`
+	RequestMessages         []llm.Message   `json:"request_messages,omitempty" yaml:"request_messages,omitempty"`
+	FallbackModels          []string        `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	ReferencedFiles         []FileReference `json:"referenced_files,omitempty" yaml:"referenced_files,omitempty"`
+	InputTokens             int             `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens       int             `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens   int             `json:"cache_write_input_tokens,omitempty" yaml:"cache_write_input_tokens,omitempty"`
+	OutputTokens            int             `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens             int             `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	EstimatedInputTokens    int             `json:"estimated_input_tokens,omitempty" yaml:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens   int             `json:"estimated_output_tokens,omitempty" yaml:"estimated_output_tokens,omitempty"`
+	MaxOutputTokens         int             `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+	RequestMessageCount     int             `json:"request_message_count,omitempty" yaml:"request_message_count,omitempty"`
+	RequestToolCount        int             `json:"request_tool_count,omitempty" yaml:"request_tool_count,omitempty"`
+	ResponseToolCallCount   int             `json:"response_tool_call_count,omitempty" yaml:"response_tool_call_count,omitempty"`
+	DurationMillis          int64           `json:"duration_millis,omitempty" yaml:"duration_millis,omitempty"`
+	FirstTokenLatencyMillis int64           `json:"first_token_latency_millis,omitempty" yaml:"first_token_latency_millis,omitempty"`
+}
+
+// ProviderCallRecord describes the request/response data used to create a
+// provider-call audit entry.
+//
+//nolint:govet // Field order follows caller data flow rather than pointer packing.
+type ProviderCallRecord struct {
+	StartedAt       time.Time
+	CompletedAt     time.Time
+	Source          string
+	Params          llm.CompleteParams
+	Response        *llm.Response
+	FallbackModels  []string
+	ReferencedFiles []FileReference
+}
+
+// FileReference records a replay-relevant file, URL, or artifact reference.
+//
+//nolint:govet // JSON/YAML field order keeps path identity before provenance metadata.
+type FileReference struct {
+	Path            string `json:"path" yaml:"path"`
+	LogicalPath     string `json:"logical_path,omitempty" yaml:"logical_path,omitempty"`
+	Kind            string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Source          string `json:"source,omitempty" yaml:"source,omitempty"`
+	SourceAgent     string `json:"source_agent,omitempty" yaml:"source_agent,omitempty"`
+	SourceSessionID string `json:"source_session_id,omitempty" yaml:"source_session_id,omitempty"`
+	SHA256          string `json:"sha256,omitempty" yaml:"sha256,omitempty"`
+	SizeBytes       int64  `json:"size_bytes,omitempty" yaml:"size_bytes,omitempty"`
+	WorktreeBranch  string `json:"worktree_branch,omitempty" yaml:"worktree_branch,omitempty"`
+	WorktreeBase    string `json:"worktree_base,omitempty" yaml:"worktree_base,omitempty"`
 }
 
 // BackgroundSuggestionUsage stores usage for background prompt suggestion calls
@@ -506,36 +592,42 @@ func New(defaultModel string, messages []llm.Message) Session {
 	copied := append([]llm.Message(nil), messages...)
 
 	return Session{
-		ID:           newID(now),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		DefaultModel: defaultModel,
-		Messages:     copied,
+		ID:            newID(now),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		DefaultModel:  defaultModel,
+		Messages:      copied,
+		SchemaVersion: SessionSchemaVersion,
 	}
 }
 
 // Load reads a session by ID or path.
 func (s *Store) Load(ref string) (Session, error) {
+	eventPath := s.eventLogPath(ref)
+	if eventPath != "" {
+		if _, err := os.Stat(eventPath); err == nil {
+			session, loadErr := s.loadEventLogSession(eventPath)
+			if loadErr != nil {
+				return Session{}, loadErr
+			}
+
+			return session, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Session{}, fmt.Errorf("session: stat event log %s: %w", eventPath, err)
+		}
+	}
+
 	path := s.path(ref)
 
-	data, err := os.ReadFile(path)
+	session, err := readLegacyJSONSession(path)
 	if err != nil {
-		return Session{}, fmt.Errorf("session: read %s: %w", path, err)
-	}
-
-	var session Session
-	if err := json.Unmarshal(data, &session); err != nil {
-		return Session{}, fmt.Errorf("session: parse %s: %w", path, err)
-	}
-
-	if session.ID == "" {
-		session.ID = idFromPath(path)
+		return Session{}, err
 	}
 
 	return session, nil
 }
 
-// Save writes a session atomically enough for local CLI use.
+// Save appends audit events for a session and refreshes the JSON projection.
 func (s *Store) Save(session Session) error {
 	if session.ID == "" {
 		return errors.New("session: id is required")
@@ -547,40 +639,41 @@ func (s *Store) Save(session Session) error {
 	}
 
 	session.UpdatedAt = now
+	session.SchemaVersion = SessionSchemaVersion
 
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return fmt.Errorf("session: create dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(session, "", "  ")
-	if err != nil {
-		return fmt.Errorf("session: marshal: %w", err)
-	}
+	var projection Session
 
-	data = append(data, '\n')
+	if err := s.withSessionLock(session.ID, func() error {
+		if err := s.appendSnapshotEventsLocked(session); err != nil {
+			return err
+		}
+
+		replayed, err := s.loadEventLogSession(s.eventLogPath(session.ID))
+		if err != nil {
+			return err
+		}
+
+		if replayed.CreatedAt.IsZero() {
+			replayed.CreatedAt = session.CreatedAt
+		}
+
+		if replayed.UpdatedAt.Before(session.UpdatedAt) {
+			replayed.UpdatedAt = session.UpdatedAt
+		}
+
+		replayed.SchemaVersion = SessionSchemaVersion
+		projection = replayed
+
+		return s.writeSessionProjectionLocked(projection)
+	}); err != nil {
+		return err
+	}
 
 	path := s.path(session.ID)
-
-	tmp, err := os.CreateTemp(s.dir, ".session-*.json")
-	if err != nil {
-		return fmt.Errorf("session: create temp: %w", err)
-	}
-
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("session: write temp: %w", err)
-	}
-
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("session: close temp: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("session: replace %s: %w", path, err)
-	}
 
 	if err := s.indexSavedSession(path); err != nil {
 		return fmt.Errorf("session: update search index: %w", err)
@@ -590,6 +683,8 @@ func (s *Store) Save(session Session) error {
 }
 
 // List returns saved sessions sorted by most recently updated first.
+//
+//nolint:gocognit // List must merge legacy projections and event-log-primary sessions.
 func (s *Store) List() ([]Summary, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -601,12 +696,29 @@ func (s *Store) List() ([]Summary, error) {
 	}
 
 	summaries := make([]Summary, 0, len(entries))
+	seenJSON := make(map[string]struct{}, len(entries))
+
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != sessionFileExt {
 			continue
 		}
 
 		path := filepath.Join(s.dir, entry.Name())
+		sessionID := idFromPath(path)
+		seenJSON[sessionID] = struct{}{}
+
+		if _, err := os.Stat(s.eventLogPath(path)); err == nil {
+			sessionState, loadErr := s.loadEventLogSession(s.eventLogPath(path))
+			if loadErr != nil {
+				return nil, loadErr
+			}
+
+			summaries = append(summaries, summarizeSession(path, sessionState))
+
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("session: stat event log %s: %w", s.eventLogPath(path), err)
+		}
 
 		summary, err := readSummary(path)
 		if err != nil {
@@ -614,6 +726,24 @@ func (s *Store) List() ([]Summary, error) {
 		}
 
 		summaries = append(summaries, summary)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !isSessionEventLogFileName(entry.Name()) {
+			continue
+		}
+
+		eventID := idFromEventLogPath(entry.Name())
+		if _, ok := seenJSON[eventID]; ok {
+			continue
+		}
+
+		sessionState, err := s.loadEventLogSession(filepath.Join(s.dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+
+		summaries = append(summaries, summarizeSession(s.eventProjectionPathForID(eventID), sessionState))
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
@@ -709,9 +839,356 @@ func (s *Store) Path(ref string) string {
 	return s.path(ref)
 }
 
+// EventLogPath returns the append-only audit log path for a session reference.
+func (s *Store) EventLogPath(ref string) string {
+	return s.eventLogPath(ref)
+}
+
+// Migrate converts a legacy JSON session projection into the append-only event
+// log format and refreshes the JSON projection with the current schema. Sessions
+// that already have an event log are validated and reprojected so migration can
+// repair missing/stale JSON projections without mutating the append-only record.
+func (s *Store) Migrate(ref string) error {
+	eventPath := s.eventLogPath(ref)
+	if _, err := os.Stat(eventPath); err == nil {
+		return s.withSessionLock(idFromEventLogPath(eventPath), func() error {
+			sessionState, loadErr := s.loadEventLogSession(eventPath)
+			if loadErr != nil {
+				return loadErr
+			}
+
+			return s.writeSessionProjectionLocked(sessionState)
+		})
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("session: stat event log %s: %w", eventPath, err)
+	}
+
+	path := s.path(ref)
+
+	sessionState, err := readLegacyJSONSession(path)
+	if err != nil {
+		return err
+	}
+
+	return s.Save(sessionState)
+}
+
 // Append adds a message to the session.
 func (s *Session) Append(role llm.Role, content string) {
 	s.Messages = append(s.Messages, llm.Message{Role: role, Content: content})
+}
+
+// NewProviderCall builds a provider-call audit record from one completion
+// request/response pair. It records the final request messages after all
+// system/reference/tool context injection so replay can explain the exact
+// provider prompt that produced the response.
+func NewProviderCall(record ProviderCallRecord) ProviderCall {
+	completedAt := record.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	} else {
+		completedAt = completedAt.UTC()
+	}
+
+	startedAt := record.StartedAt
+	if startedAt.IsZero() && record.Response != nil && record.Response.Latency > 0 {
+		startedAt = completedAt.Add(-record.Response.Latency)
+	}
+
+	if !startedAt.IsZero() {
+		startedAt = startedAt.UTC()
+	}
+
+	requestMessages := append([]llm.Message(nil), record.Params.Messages...)
+	responseModel := ""
+	provider := ""
+	stopReason := llm.StopReason("")
+	responseHash := ""
+	durationMillis := int64(0)
+	firstTokenLatencyMillis := int64(0)
+	inputTokens := 0
+	cachedInputTokens := 0
+	cacheWriteInputTokens := 0
+	outputTokens := 0
+	responseToolCalls := 0
+
+	if record.Response != nil {
+		responseModel = strings.TrimSpace(record.Response.Model)
+		provider = strings.TrimSpace(record.Response.Provider)
+		stopReason = record.Response.StopReason
+		responseHash = hashJSON(record.Response.Content)
+		durationMillis = durationToMillis(record.Response.Latency)
+		firstTokenLatencyMillis = durationToMillis(record.Response.FirstTokenLatency)
+		inputTokens = max(record.Response.InputTokens, 0)
+		cachedInputTokens = max(record.Response.CachedInputTokens, 0)
+		cacheWriteInputTokens = max(record.Response.CacheWriteInputTokens, 0)
+		outputTokens = max(record.Response.OutputTokens, 0)
+		responseToolCalls = len(record.Response.ToolCalls)
+	}
+
+	model := firstNonEmptyString(responseModel, record.Params.Model)
+	if provider == "" {
+		provider = providerFromModel(model)
+	}
+
+	call := ProviderCall{
+		StartedAt:               startedAt,
+		CompletedAt:             completedAt,
+		ID:                      newID(completedAt),
+		Source:                  strings.TrimSpace(record.Source),
+		Provider:                provider,
+		RequestedModel:          strings.TrimSpace(record.Params.Model),
+		ResponseModel:           responseModel,
+		ModelMode:               strings.TrimSpace(record.Params.ModelMode),
+		ReasoningLevel:          strings.TrimSpace(record.Params.ReasoningLevel),
+		PromptHash:              hashJSON(requestMessages),
+		ConfigHash:              providerCallConfigHash(record.Params, record.FallbackModels),
+		ResponseHash:            responseHash,
+		StopReason:              stopReason,
+		RequestMessages:         requestMessages,
+		FallbackModels:          append([]string(nil), record.FallbackModels...),
+		ReferencedFiles:         cloneFileReferences(record.ReferencedFiles),
+		InputTokens:             inputTokens,
+		CachedInputTokens:       cachedInputTokens,
+		CacheWriteInputTokens:   cacheWriteInputTokens,
+		OutputTokens:            outputTokens,
+		TotalTokens:             inputTokens + outputTokens,
+		EstimatedInputTokens:    llm.EstimateTokens(requestMessages),
+		MaxOutputTokens:         max(record.Params.MaxTokens, 0),
+		RequestMessageCount:     len(requestMessages),
+		RequestToolCount:        len(record.Params.Tools),
+		ResponseToolCallCount:   responseToolCalls,
+		DurationMillis:          durationMillis,
+		FirstTokenLatencyMillis: firstTokenLatencyMillis,
+	}
+
+	if call.Source == "" {
+		call.Source = "session"
+	}
+
+	return call
+}
+
+func providerCallConfigHash(params llm.CompleteParams, fallbackModels []string) string {
+	//nolint:govet // Hash field order is intentionally stable for replay.
+	config := struct {
+		Temperature    *float64            `json:"temperature,omitempty"`
+		TopP           *float64            `json:"top_p,omitempty"`
+		Seed           *int                `json:"seed,omitempty"`
+		ResponseFormat *llm.ResponseFormat `json:"response_format,omitempty"`
+		Model          string              `json:"model,omitempty"`
+		ModelMode      string              `json:"model_mode,omitempty"`
+		ReasoningLevel string              `json:"reasoning_level,omitempty"`
+		FallbackModels []string            `json:"fallback_models,omitempty"`
+		Stop           []string            `json:"stop,omitempty"`
+		MaxTokens      int                 `json:"max_tokens,omitempty"`
+		ToolNames      []string            `json:"tool_names,omitempty"`
+	}{
+		Temperature:    params.Temperature,
+		TopP:           params.TopP,
+		Seed:           params.Seed,
+		ResponseFormat: params.ResponseFormat,
+		Model:          strings.TrimSpace(params.Model),
+		ModelMode:      strings.TrimSpace(params.ModelMode),
+		ReasoningLevel: strings.TrimSpace(params.ReasoningLevel),
+		FallbackModels: append([]string(nil), fallbackModels...),
+		Stop:           append([]string(nil), params.Stop...),
+		MaxTokens:      max(params.MaxTokens, 0),
+		ToolNames:      toolDefinitionNames(params.Tools),
+	}
+
+	return hashJSON(config)
+}
+
+func toolDefinitionNames(tools []llm.ToolDefinition) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
+}
+
+func durationToMillis(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+
+	return int64(duration / time.Millisecond)
+}
+
+// RecordProviderCall appends a provider-call audit entry unless the same call
+// was already recorded.
+func (s *Session) RecordProviderCall(call ProviderCall) bool {
+	call = normalizeProviderCall(call)
+	if !providerCallHasEvidence(call) {
+		return false
+	}
+
+	if strings.TrimSpace(call.ID) == "" {
+		return false
+	}
+
+	key := providerCallIdentity(call)
+
+	for index := range s.ProviderCalls {
+		existing := &s.ProviderCalls[index]
+		if providerCallIdentity(*existing) == key {
+			return false
+		}
+	}
+
+	s.ProviderCalls = append(s.ProviderCalls, call)
+
+	return true
+}
+
+func providerCallHasEvidence(call ProviderCall) bool {
+	return strings.TrimSpace(call.Provider) != "" ||
+		strings.TrimSpace(call.RequestedModel) != "" ||
+		strings.TrimSpace(call.ResponseModel) != "" ||
+		strings.TrimSpace(call.PromptHash) != "" ||
+		strings.TrimSpace(call.ResponseHash) != "" ||
+		call.InputTokens > 0 ||
+		call.OutputTokens > 0 ||
+		call.TotalTokens > 0 ||
+		call.RequestMessageCount > 0 ||
+		len(call.RequestMessages) > 0
+}
+
+func normalizeProviderCall(call ProviderCall) ProviderCall {
+	if call.CompletedAt.IsZero() {
+		call.CompletedAt = time.Now().UTC()
+	} else {
+		call.CompletedAt = call.CompletedAt.UTC()
+	}
+
+	if !call.StartedAt.IsZero() {
+		call.StartedAt = call.StartedAt.UTC()
+	}
+
+	if strings.TrimSpace(call.ID) == "" {
+		call.ID = newID(call.CompletedAt)
+	}
+
+	call.Source = strings.TrimSpace(call.Source)
+	if call.Source == "" {
+		call.Source = "session"
+	}
+
+	call.Provider = strings.TrimSpace(call.Provider)
+	call.RequestedModel = strings.TrimSpace(call.RequestedModel)
+	call.ResponseModel = strings.TrimSpace(call.ResponseModel)
+	call.ModelMode = strings.TrimSpace(call.ModelMode)
+	call.ReasoningLevel = strings.TrimSpace(call.ReasoningLevel)
+	call.PromptHash = strings.TrimSpace(call.PromptHash)
+	call.ConfigHash = strings.TrimSpace(call.ConfigHash)
+	call.ResponseHash = strings.TrimSpace(call.ResponseHash)
+
+	if call.Provider == "" {
+		call.Provider = providerFromModel(firstNonEmptyString(call.ResponseModel, call.RequestedModel))
+	}
+
+	if call.PromptHash == "" && len(call.RequestMessages) > 0 {
+		call.PromptHash = hashJSON(call.RequestMessages)
+	}
+
+	if call.RequestMessageCount == 0 {
+		call.RequestMessageCount = len(call.RequestMessages)
+	}
+
+	call.FallbackModels = compactStringSlice(call.FallbackModels)
+	call.ReferencedFiles = cloneFileReferences(call.ReferencedFiles)
+	call.RequestMessages = append([]llm.Message(nil), call.RequestMessages...)
+	call.InputTokens = max(call.InputTokens, 0)
+	call.CachedInputTokens = max(call.CachedInputTokens, 0)
+	call.CacheWriteInputTokens = max(call.CacheWriteInputTokens, 0)
+	call.OutputTokens = max(call.OutputTokens, 0)
+	call.TotalTokens = max(call.TotalTokens, 0)
+
+	if call.TotalTokens == 0 {
+		call.TotalTokens = call.InputTokens + call.OutputTokens
+	}
+
+	call.EstimatedInputTokens = max(call.EstimatedInputTokens, 0)
+	call.EstimatedOutputTokens = max(call.EstimatedOutputTokens, 0)
+	call.MaxOutputTokens = max(call.MaxOutputTokens, 0)
+	call.RequestToolCount = max(call.RequestToolCount, 0)
+	call.ResponseToolCallCount = max(call.ResponseToolCallCount, 0)
+	call.DurationMillis = nonNegativeInt64(call.DurationMillis)
+	call.FirstTokenLatencyMillis = nonNegativeInt64(call.FirstTokenLatencyMillis)
+
+	return call
+}
+
+func providerCallIdentity(call ProviderCall) string {
+	return strings.Join([]string{
+		call.ID,
+		call.Source,
+		call.Provider,
+		call.RequestedModel,
+		call.ResponseModel,
+		call.PromptHash,
+		call.ResponseHash,
+		call.CompletedAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+}
+
+func compactStringSlice(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+
+	return out
+}
+
+func cloneFileReferences(refs []FileReference) []FileReference {
+	if len(refs) == 0 {
+		return nil
+	}
+
+	out := make([]FileReference, 0, len(refs))
+	for i := range refs {
+		ref := normalizeFileReference(refs[i])
+		if strings.TrimSpace(ref.Path) != "" {
+			out = append(out, ref)
+		}
+	}
+
+	return out
+}
+
+func normalizeFileReference(ref FileReference) FileReference {
+	ref.Path = strings.TrimSpace(ref.Path)
+	ref.LogicalPath = strings.TrimSpace(ref.LogicalPath)
+	ref.Kind = strings.TrimSpace(ref.Kind)
+	ref.Source = strings.TrimSpace(ref.Source)
+	ref.SourceAgent = strings.TrimSpace(ref.SourceAgent)
+	ref.SourceSessionID = strings.TrimSpace(ref.SourceSessionID)
+	ref.SHA256 = strings.ToLower(strings.TrimSpace(ref.SHA256))
+	ref.WorktreeBranch = strings.TrimSpace(ref.WorktreeBranch)
+	ref.WorktreeBase = strings.TrimSpace(ref.WorktreeBase)
+
+	if ref.SizeBytes < 0 {
+		ref.SizeBytes = 0
+	}
+
+	return ref
+}
+
+func nonNegativeInt64(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+
+	return value
 }
 
 // RecordBackgroundSuggestionUsage records one background suggestion attempt

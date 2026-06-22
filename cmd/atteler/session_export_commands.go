@@ -224,6 +224,10 @@ func exportSession(sessionState session.Session, format string) error {
 }
 
 func printTranscript(sessionState session.Session) {
+	if line := formatTranscriptProvenance(sessionState); line != "" {
+		fmt.Println(line)
+	}
+
 	for _, msg := range sessionState.Messages {
 		switch msg.Role {
 		case llm.RoleUser:
@@ -233,5 +237,221 @@ func printTranscript(sessionState session.Session) {
 		default:
 			fmt.Println(dimStyle.Render(string(msg.Role)) + " " + msg.Content)
 		}
+	}
+}
+
+func formatTranscriptProvenance(sessionState session.Session) string {
+	provenance := session.BuildMachineReadableExport(sessionState, session.ExportOptions{
+		Profile: session.ExportProfileIssue,
+	}).Provenance
+
+	parts := []string{"Provenance", "config_hash=" + provenance.ConfigHash}
+	if len(provenance.Providers) > 0 {
+		parts = append(parts, "providers="+strings.Join(provenance.Providers, ","))
+	}
+
+	if len(provenance.Models) > 0 {
+		parts = append(parts, "models="+strings.Join(provenance.Models, ","))
+	}
+
+	appendEventLogTranscriptProvenance(&parts, provenance.EventLog)
+
+	if provenance.TokenUsage.TotalTokens > 0 {
+		parts = append(parts, "total_tokens="+strconv.Itoa(provenance.TokenUsage.TotalTokens))
+	}
+
+	appendProviderCallTranscriptProvenance(&parts, provenance.ProviderCalls)
+
+	if len(provenance.ReferencedFiles) > 0 {
+		parts = append(parts, "files="+strconv.Itoa(len(provenance.ReferencedFiles)))
+		if refs := formatTranscriptFileReferences(provenance.ReferencedFiles); refs != "" {
+			parts = append(parts, "file_refs="+refs)
+		}
+	}
+
+	if len(provenance.VerificationGates) > 0 {
+		parts = append(parts, "gates="+strconv.Itoa(len(provenance.VerificationGates)))
+		if gates := formatTranscriptVerificationGates(provenance.VerificationGates); gates != "" {
+			parts = append(parts, "gate_checks="+gates)
+		}
+	}
+
+	return strings.Join(parts, "\t")
+}
+
+func appendEventLogTranscriptProvenance(parts *[]string, eventLog *session.ExportEventLogProvenance) {
+	if eventLog == nil {
+		return
+	}
+
+	if eventLog.SchemaVersion > 0 {
+		*parts = append(*parts, "event_schema="+strconv.Itoa(eventLog.SchemaVersion))
+	}
+
+	if eventLog.LastHash != "" {
+		*parts = append(*parts, "event_hash="+eventLog.LastHash)
+	}
+
+	if eventLog.EventCount > 0 {
+		*parts = append(*parts, "events="+strconv.Itoa(eventLog.EventCount))
+	}
+
+	if eventLog.LastSequence > 0 {
+		*parts = append(*parts, "event_sequence="+strconv.FormatInt(eventLog.LastSequence, 10))
+	}
+
+	if eventLog.TruncatedTail {
+		*parts = append(*parts, "event_truncated_tail=true")
+	}
+}
+
+func formatTranscriptFileReferences(files []session.ExportFileReference) string {
+	if len(files) == 0 {
+		return ""
+	}
+
+	refs := make([]string, 0, len(files))
+	for index := range files {
+		file := files[index]
+
+		label := strings.TrimSpace(file.LogicalPath)
+		if label == "" {
+			label = strings.TrimSpace(file.Path)
+		}
+
+		if label == "" {
+			continue
+		}
+
+		if kind := strings.TrimSpace(file.Kind); kind != "" {
+			label = kind + ":" + label
+		}
+
+		if hash := strings.TrimSpace(file.SHA256); hash != "" {
+			label += "@" + hash
+		}
+
+		refs = append(refs, transcriptProvenanceToken(label))
+	}
+
+	return strings.Join(refs, ",")
+}
+
+func formatTranscriptVerificationGates(gates []session.ExportVerificationGate) string {
+	if len(gates) == 0 {
+		return ""
+	}
+
+	refs := make([]string, 0, len(gates))
+	for index := range gates {
+		gate := gates[index]
+
+		label := strings.TrimSpace(gate.Name)
+		if label == "" {
+			continue
+		}
+
+		if phase := strings.TrimSpace(gate.Phase); phase != "" {
+			label = phase + "/" + label
+		}
+
+		if runID := strings.TrimSpace(gate.RunID); runID != "" {
+			label = runID + "/" + label
+		}
+
+		if agent := strings.TrimSpace(gate.Agent); agent != "" {
+			label += "@" + agent
+		}
+
+		status := strings.ToLower(gateStatusFail)
+		if gate.Passed {
+			status = strings.ToLower(gateStatusPass)
+		}
+
+		refs = append(refs, transcriptProvenanceToken(label+":"+status))
+	}
+
+	return strings.Join(refs, ",")
+}
+
+func transcriptProvenanceToken(value string) string {
+	value = strings.TrimSpace(strings.Join(strings.Fields(value), " "))
+	if value == "" {
+		return ""
+	}
+
+	if strings.ContainsAny(value, "\t\n\r ,") {
+		return strconv.Quote(value)
+	}
+
+	return value
+}
+
+func appendProviderCallTranscriptProvenance(parts *[]string, calls []session.ExportProviderCall) {
+	if len(calls) == 0 {
+		return
+	}
+
+	*parts = append(*parts, "provider_calls="+strconv.Itoa(len(calls)))
+
+	promptHashes := providerCallHashes(calls, func(call session.ExportProviderCall) string {
+		return call.PromptHash
+	})
+	appendHashList(parts, "prompt_hash", "prompt_hashes", promptHashes)
+
+	configHashes := providerCallHashes(calls, func(call session.ExportProviderCall) string {
+		return call.ConfigHash
+	})
+	appendHashList(parts, "call_config_hash", "call_config_hashes", configHashes)
+
+	toolCalls := 0
+	toolResults := 0
+
+	for index := range calls {
+		toolCalls += calls[index].RequestToolCallCount
+		toolResults += calls[index].RequestToolResultCount
+	}
+
+	if toolCalls > 0 {
+		*parts = append(*parts, "tool_calls="+strconv.Itoa(toolCalls))
+	}
+
+	if toolResults > 0 {
+		*parts = append(*parts, "tool_results="+strconv.Itoa(toolResults))
+	}
+}
+
+func providerCallHashes(
+	calls []session.ExportProviderCall,
+	selectHash func(session.ExportProviderCall) string,
+) []string {
+	seen := make(map[string]struct{}, len(calls))
+	hashes := make([]string, 0, len(calls))
+
+	for index := range calls {
+		hash := strings.TrimSpace(selectHash(calls[index]))
+		if hash == "" {
+			continue
+		}
+
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+
+		seen[hash] = struct{}{}
+		hashes = append(hashes, hash)
+	}
+
+	return hashes
+}
+
+func appendHashList(parts *[]string, singular, plural string, hashes []string) {
+	switch len(hashes) {
+	case 0:
+		return
+	case 1:
+		*parts = append(*parts, singular+"="+hashes[0])
+	default:
+		*parts = append(*parts, plural+"="+strings.Join(hashes, ","))
 	}
 }
