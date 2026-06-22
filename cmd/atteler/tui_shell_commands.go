@@ -462,7 +462,7 @@ func (m model) updateShellResult(msg shellResultMsg) (tea.Model, tea.Cmd) {
 	})
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
 
-	cmds := []tea.Cmd{tea.SetWindowTitle(terminalIdleTitle()), emitHook(m.ctx, m.hookRunner, outputEvent)}
+	cmds := []tea.Cmd{tea.SetWindowTitle(m.terminalIdleTitle()), emitHook(m.ctx, m.hookRunner, outputEvent)}
 	if !msg.streamed && msg.stdout != "" {
 		cmds = append(cmds, tea.Println(strings.TrimRight(msg.stdout, "\n")))
 	}

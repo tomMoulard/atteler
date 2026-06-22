@@ -330,6 +330,7 @@ type model struct {
 	selectedAgent        string
 	sessionPath          string
 	cwd                  string
+	gitBranch            string
 	selectedProvider     string
 	fallbackModels       []string
 
@@ -468,6 +469,7 @@ func initialModel(
 		skillLearningEnabled:        skillLearningEnabled,
 		sessionPath:                 sessionPath,
 		cwd:                         cwd,
+		gitBranch:                   currentGitBranch(cwd),
 		selectedModel:               selectedModel,
 		selectedAgent:               selectedAgent,
 		selectedProvider:            selectedProvider,

@@ -19,7 +19,7 @@ import (
 
 // Init returns the initial command.
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, tea.SetWindowTitle(m.terminalIdleTitle()))
 }
 
 // Update handles incoming messages.
@@ -319,7 +319,7 @@ func (m model) updateTaskTick(msg taskTickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.checkpointResponseCh != nil {
-		return m, tea.SetWindowTitle(terminalIdleTitle())
+		return m, tea.SetWindowTitle(m.terminalIdleTitle())
 	}
 
 	m.terminalTitleFrame++
@@ -339,7 +339,7 @@ func (m model) updateLoopCheckpoint(msg loopCheckpointMsg) (tea.Model, tea.Cmd) 
 		m.checkpointPrompt = fmt.Sprintf("Agent loop reached %d iterations. Continue? [Y/n] ", msg.request.iterations)
 	}
 
-	return m, tea.Batch(tea.Println(warnStyle.Render(m.checkpointPrompt)), tea.SetWindowTitle(terminalIdleTitle()))
+	return m, tea.Batch(tea.Println(warnStyle.Render(m.checkpointPrompt)), tea.SetWindowTitle(m.terminalIdleTitle()))
 }
 
 // handleCheckpointKey handles Y/N key presses during an agent-loop prompt.
@@ -572,7 +572,7 @@ func (m model) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 
 		return m, tea.Batch(
 			tea.Println(errStyle.Render("(canceled"+taskDurationSuffix(elapsed)+")")),
-			tea.SetWindowTitle(terminalIdleTitle()),
+			tea.SetWindowTitle(m.terminalIdleTitle()),
 		), true
 	}
 

@@ -3250,7 +3250,7 @@ func TestTerminalControlKeyMsg(t *testing.T) {
 func TestRunningTaskUpdatesTerminalTitle(t *testing.T) {
 	t.Parallel()
 
-	m := model{}
+	m := model{gitBranch: "feature/x"}
 	cmd := m.startRunningTask("LLM")
 	require.NotNil(t, cmd)
 
@@ -3258,14 +3258,30 @@ func TestRunningTaskUpdatesTerminalTitle(t *testing.T) {
 	batch, ok := raw.(tea.BatchMsg)
 	require.True(t, ok)
 	require.Len(t, batch, 2)
-	assert.Contains(t, stripANSI(toStringMsg(batch[0]())), "atteler")
-	assert.Contains(t, stripANSI(toStringMsg(batch[0]())), "LLM")
+	title := stripANSI(toStringMsg(batch[0]()))
+	assert.Contains(t, title, "atteler")
+	assert.Contains(t, title, "(feature/x)")
+	// The running task label is shown in the in-app status line, not the
+	// terminal title.
+	assert.NotContains(t, title, "LLM")
 
 	nextModel, tickCmd := m.updateTaskTick(taskTickMsg{id: m.runningTaskID})
 	next, ok := nextModel.(model)
 	require.True(t, ok)
 	require.NotNil(t, tickCmd)
 	assert.Equal(t, 1, next.terminalTitleFrame)
+}
+
+func TestTerminalTitlesIncludeGitBranch(t *testing.T) {
+	t.Parallel()
+
+	m := model{gitBranch: "main", terminalTitleFrame: 0}
+	assert.Equal(t, "atteler (main)", m.terminalIdleTitle())
+	assert.Contains(t, m.terminalWorkingTitle(), "atteler (main)")
+
+	bare := model{}
+	assert.Equal(t, "atteler", bare.terminalIdleTitle())
+	assert.NotContains(t, bare.terminalWorkingTitle(), "(")
 }
 
 func TestView_RendersInlinePromptSuggestion(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +31,12 @@ func (m *model) startRunningTask(label string) tea.Cmd {
 	m.runningTaskLabel = label
 	m.runningTaskStarted = time.Now()
 	m.terminalTitleFrame = 0
+
+	// Refresh the branch in case the user switched branches since launch. Keep
+	// the last known branch if the lookup comes back empty.
+	if branch := currentGitBranch(m.cwd); branch != "" {
+		m.gitBranch = branch
+	}
 
 	return tea.Batch(tea.SetWindowTitle(m.terminalWorkingTitle()), taskTickCmd(m.runningTaskID))
 }
@@ -61,22 +69,106 @@ func taskTickCmd(id int) tea.Cmd {
 	})
 }
 
-func terminalIdleTitle() string {
-	return "atteler"
+func (m model) terminalIdleTitle() string {
+	return "atteler" + terminalBranchSuffix(m.gitBranch)
 }
 
 func (m model) terminalWorkingTitle() string {
-	label := strings.TrimSpace(m.runningTaskLabel)
-	if label == "" {
-		label = "working"
-	}
-
 	frame := "-"
 	if len(terminalTitleSpinnerFrames) > 0 {
 		frame = terminalTitleSpinnerFrames[m.terminalTitleFrame%len(terminalTitleSpinnerFrames)]
 	}
 
-	return frame + " atteler — " + label
+	return frame + " atteler" + terminalBranchSuffix(m.gitBranch)
+}
+
+// terminalBranchSuffix renders the git branch as a " (branch)" suffix for the
+// terminal title, or an empty string when the branch is unknown.
+func terminalBranchSuffix(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+
+	return " (" + branch + ")"
+}
+
+// currentGitBranch reports the branch checked out at or above dir by reading
+// .git/HEAD directly. It never shells out or prompts for permission, since the
+// terminal title is cosmetic and refreshes on the spinner tick. It returns an
+// empty string when dir is not inside a git work tree; for a detached HEAD it
+// returns a short commit hash.
+func currentGitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
+
+	gitDir, ok := locateGitDir(dir)
+	if !ok {
+		return ""
+	}
+
+	data, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return ""
+	}
+
+	head := strings.TrimSpace(string(data))
+	if branch, found := strings.CutPrefix(head, "ref: refs/heads/"); found {
+		return branch
+	}
+
+	if len(head) >= 7 {
+		return head[:7]
+	}
+
+	return ""
+}
+
+// locateGitDir walks up from dir to find the repository's git directory,
+// resolving the "gitdir:" pointer that worktrees and submodules use in place of
+// a .git directory.
+func locateGitDir(dir string) (string, bool) {
+	for {
+		gitPath := filepath.Join(dir, ".git")
+
+		info, err := os.Stat(gitPath)
+		switch {
+		case err != nil:
+			// Keep walking up to the filesystem root.
+		case info.IsDir():
+			return gitPath, true
+		default:
+			return resolveGitdirPointer(dir, gitPath)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+
+		dir = parent
+	}
+}
+
+// resolveGitdirPointer reads a ".git" file ("gitdir: <path>") and returns the
+// referenced git directory, resolving relative paths against dir.
+func resolveGitdirPointer(dir, gitFile string) (string, bool) {
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return "", false
+	}
+
+	target := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	if target == "" {
+		return "", false
+	}
+
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(dir, target)
+	}
+
+	return target, true
 }
 
 // updatePicker handles key events while the model picker is open.

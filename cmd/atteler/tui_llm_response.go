@@ -30,7 +30,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	m.cancel = nil
 	elapsed := m.finishRunningTask(msg.completedAt)
 
-	cmds := []tea.Cmd{tea.SetWindowTitle(terminalIdleTitle())}
+	cmds := []tea.Cmd{tea.SetWindowTitle(m.terminalIdleTitle())}
 	if !msg.liveEvents {
 		cmds = append(eventLineCommands(msg.eventLines), cmds...)
 	}
