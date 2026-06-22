@@ -492,12 +492,38 @@ func providerCallEventsForSession(at time.Time, calls []ProviderCall) []pendingE
 		call := normalizeProviderCall(calls[index])
 		events = append(events, mustPendingEvent(at, EventProviderCallRecorded, providerCallFromSession(call)))
 
+		events = append(events, toolEventsForProviderCall(at, call)...)
+
 		for refIndex := range call.ReferencedFiles {
 			events = append(events, mustPendingEvent(
 				at,
 				EventFileReferenceRecorded,
 				fileReferenceEventFromReference(call.ReferencedFiles[refIndex]),
 			))
+		}
+	}
+
+	return events
+}
+
+func toolEventsForProviderCall(at time.Time, call ProviderCall) []pendingEvent {
+	var events []pendingEvent
+
+	for messageIndex := range call.RequestMessages {
+		message := &call.RequestMessages[messageIndex]
+
+		for _, toolCall := range message.ToolCalls {
+			events = append(events, mustPendingEvent(at, EventToolCallRecorded, toolCallEvent{
+				MessageIndex: messageIndex,
+				Call:         toolCall,
+			}))
+		}
+
+		if message.ToolResult != nil {
+			events = append(events, mustPendingEvent(at, EventToolResultRecorded, toolResultEvent{
+				MessageIndex: messageIndex,
+				Result:       *message.ToolResult,
+			}))
 		}
 	}
 

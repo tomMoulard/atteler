@@ -556,7 +556,7 @@ func runOnceWithOptions(
 
 	agentLoopPreflight := runOnceAgentLoopManifestPreflight(ctx, hooks, reg, store, headlessRun, store.Path(sessionState.ID), sessionState.ID, prepared.activeAgent.name, prepared.fallbackModels, prepared.inlineReferenceEvents, refCtx.Manifest, maxInputTokens)
 
-	resp, err := runOnceCompleteWithAutonomy(
+	resp, providerRequestMessages, err := runOnceCompleteWithAutonomyTranscript(
 		ctx,
 		reg,
 		params,
@@ -602,6 +602,7 @@ func runOnceWithOptions(
 		params.ModelMode,
 		params,
 		prepared.fallbackModels,
+		providerRequestMessages,
 		refCtx.Manifest,
 		resp,
 		checkpointPath,
@@ -622,6 +623,7 @@ func finishRunOnceSuccess(
 	modelMode string,
 	params llm.CompleteParams,
 	fallbackModels []string,
+	providerRequestMessages []llm.Message,
 	referenceManifest contextref.ReferenceManifest,
 	resp *llm.Response,
 	checkpointPath string,
@@ -635,10 +637,15 @@ func finishRunOnceSuccess(
 		return err
 	}
 
+	providerParams := params
+	if len(providerRequestMessages) > 0 {
+		providerParams.Messages = append([]llm.Message(nil), providerRequestMessages...)
+	}
+
 	providerCall := session.NewProviderCall(session.ProviderCallRecord{
 		CompletedAt:     time.Now().UTC(),
 		Source:          "run_once",
-		Params:          params,
+		Params:          providerParams,
 		Response:        resp,
 		FallbackModels:  fallbackModels,
 		ReferencedFiles: sessionFileReferencesFromManifest(referenceManifest, agentName),
@@ -1872,6 +1879,40 @@ func runOnceCompleteWithAutonomy(
 	beforeModelCall func(iteration int, params llm.CompleteParams) error,
 	audit attshell.AuditContext,
 ) (*llm.Response, error) {
+	resp, _, err := runOnceCompleteWithAutonomyTranscript(
+		ctx,
+		reg,
+		params,
+		fallbackModels,
+		agentLoopBudget,
+		autonomyLevel,
+		agentLoopCheckpointInterval,
+		responseOptions,
+		permissionPolicy,
+		allowPermissionPrompt,
+		checkpointPath,
+		beforeModelCall,
+		audit,
+	)
+
+	return resp, err
+}
+
+func runOnceCompleteWithAutonomyTranscript(
+	ctx context.Context,
+	reg *llm.Registry,
+	params llm.CompleteParams,
+	fallbackModels []string,
+	agentLoopBudget llm.AgentLoopBudget,
+	autonomyLevel autonomy.Level,
+	agentLoopCheckpointInterval int,
+	responseOptions responseRecordOptions,
+	permissionPolicy *permission.Policy,
+	allowPermissionPrompt bool,
+	checkpointPath string,
+	beforeModelCall func(iteration int, params llm.CompleteParams) error,
+	audit attshell.AuditContext,
+) (*llm.Response, []llm.Message, error) {
 	autonomyLevel = autonomy.Normalize(autonomyLevel)
 
 	ctx = permission.ContextWithPolicy(ctx, permissionPolicy)
@@ -1882,33 +1923,33 @@ func runOnceCompleteWithAutonomy(
 	if responseOptions.ReplayPath != "" {
 		resp, err := loadRecordedResponse(ctx, responseOptions.ReplayPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if err := enforceReplayAgentLoopBudget(reg, params.Model, fallbackModels, agentLoopBudget, resp); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
-		return resp, nil
+		return resp, append([]llm.Message(nil), params.Messages...), nil
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("get working directory: %w", err)
+		return nil, nil, fmt.Errorf("get working directory: %w", err)
 	}
 
 	executor := newBashExecutor(cwd, os.Stderr, audit, permissionPolicy)
 
 	costEstimator, err := agentLoopCostEstimatorForBudget(reg, params.Model, fallbackModels, agentLoopBudget)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	resp, _, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
+	resp, messages, err := llm.AgentLoop(ctx, reg, params, fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueStdin,
 		ConfirmToolCall:    confirmToolCallStdin,
 		BeforeModelCall:    beforeModelCall,
@@ -1920,14 +1961,14 @@ func runOnceCompleteWithAutonomy(
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {
-		return nil, agentLoopError(err, checkpointPath)
+		return nil, messages, agentLoopError(err, checkpointPath)
 	}
 
 	if err := saveRecordedResponse(ctx, responseOptions.RecordPath, params, fallbackModels, resp); err != nil {
-		return nil, err
+		return nil, messages, err
 	}
 
-	return resp, nil
+	return resp, messages, nil
 }
 
 func enforceReplayAgentLoopBudget(

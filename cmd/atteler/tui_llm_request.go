@@ -307,7 +307,7 @@ func callLLMWithTools(
 		}
 	}
 
-	resp, _, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
+	resp, messages, err := llm.AgentLoop(ctx, reg, params, request.fallbackModels, executor, llm.AgentLoopConfig{
 		ConfirmContinue:    confirmContinueFn,
 		ConfirmToolCall:    confirmToolFn,
 		BeforeModelCall:    agentLoopManifestPreflight(ctx, reg, request),
@@ -333,6 +333,11 @@ func callLLMWithTools(
 
 	completedAt := time.Now()
 
+	providerParams := params
+	if len(messages) > 0 {
+		providerParams.Messages = append([]llm.Message(nil), messages...)
+	}
+
 	return llmResponseMsg{
 		completedAt:             completedAt,
 		content:                 resp.Content,
@@ -344,7 +349,7 @@ func callLLMWithTools(
 		providerCall: session.NewProviderCall(session.ProviderCallRecord{
 			CompletedAt:     completedAt,
 			Source:          "tui_agent_loop",
-			Params:          params,
+			Params:          providerParams,
 			Response:        resp,
 			FallbackModels:  request.fallbackModels,
 			ReferencedFiles: sessionFileReferencesFromLLMRequest(request),

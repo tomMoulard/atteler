@@ -209,6 +209,23 @@ func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
 			Messages: []llm.Message{
 				{Role: llm.RoleSystem, Content: "reference context"},
 				{Role: llm.RoleUser, Content: "summarize README"},
+				{
+					Role:    llm.RoleAssistant,
+					Content: "reading file",
+					ToolCalls: []llm.ToolCall{{
+						ID:    "tool-1",
+						Name:  "read_file",
+						Input: map[string]any{"path": "README.md"},
+					}},
+				},
+				{
+					Role:    llm.RoleTool,
+					Content: "README contents",
+					ToolResult: &llm.ToolResult{
+						ToolCallID: "tool-1",
+						Content:    "README contents",
+					},
+				},
 			},
 			MaxTokens: 256,
 		},
@@ -235,6 +252,8 @@ func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
 	data := readSessionTestFile(t, store.EventLogPath(sessionState.ID))
 	assert.Contains(t, data, string(EventProviderCallRecorded))
 	assert.Contains(t, data, `"request_messages"`)
+	assert.Contains(t, data, string(EventToolCallRecorded))
+	assert.Contains(t, data, string(EventToolResultRecorded))
 	assert.Contains(t, data, string(EventFileReferenceRecorded))
 
 	require.NoError(t, os.Remove(store.Path(sessionState.ID)))
@@ -244,7 +263,7 @@ func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
 	assert.Equal(t, call.PromptHash, loaded.ProviderCalls[0].PromptHash)
 	assert.Equal(t, "openai", loaded.ProviderCalls[0].Provider)
 	assert.Equal(t, 12, loaded.ProviderCalls[0].TotalTokens)
-	require.Len(t, loaded.ProviderCalls[0].RequestMessages, 2)
+	require.Len(t, loaded.ProviderCalls[0].RequestMessages, 4)
 
 	export := BuildMachineReadableExport(loaded, ExportOptions{Profile: ExportProfilePrivate})
 	assert.Contains(t, export.Provenance.Providers, "openai")

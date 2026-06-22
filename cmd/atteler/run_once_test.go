@@ -70,6 +70,104 @@ func (p runOnceCapabilityProvider) Capabilities() llm.ProviderCapabilities {
 	return p.capabilities
 }
 
+type runOnceSequenceProvider struct {
+	name      string
+	model     string
+	responses []*llm.Response
+	requests  []llm.CompleteParams
+}
+
+func (p *runOnceSequenceProvider) Name() string { return p.name }
+
+func (p *runOnceSequenceProvider) Models() []string { return []string{p.model} }
+
+func (p *runOnceSequenceProvider) FetchModels(context.Context) ([]string, error) {
+	return p.Models(), nil
+}
+
+func (p *runOnceSequenceProvider) HealthCheck(context.Context) error { return nil }
+
+func (p *runOnceSequenceProvider) ModelContextWindow(string) int { return 128_000 }
+
+func (p *runOnceSequenceProvider) Complete(_ context.Context, params llm.CompleteParams) (*llm.Response, error) {
+	p.requests = append(p.requests, params)
+	if len(p.responses) == 0 {
+		return nil, errors.New("missing response")
+	}
+
+	resp := p.responses[0]
+	p.responses = append([]*llm.Response(nil), p.responses[1:]...)
+
+	return resp, nil
+}
+
+func TestRunOnceCompleteWithAutonomyTranscriptReturnsToolMessages(t *testing.T) {
+	t.Parallel()
+
+	provider := &runOnceSequenceProvider{
+		name:  "openai",
+		model: "openai/gpt-test",
+		responses: []*llm.Response{
+			{
+				Content: "need file",
+				Model:   "openai/gpt-test",
+				ToolCalls: []llm.ToolCall{{
+					ID:    "tool-1",
+					Name:  llm.ToolNameBash,
+					Input: map[string]any{"command": "printf tool-output"},
+				}},
+				StopReason: llm.StopToolUse,
+			},
+			{
+				Content:      "done",
+				Model:        "openai/gpt-test",
+				StopReason:   llm.StopEndTurn,
+				InputTokens:  3,
+				OutputTokens: 2,
+			},
+		},
+	}
+	reg := llm.NewRegistry()
+	reg.Register(provider)
+
+	resp, messages, err := runOnceCompleteWithAutonomyTranscript(
+		context.Background(),
+		reg,
+		llm.CompleteParams{
+			Model:    "openai/gpt-test",
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "use a tool"}},
+			Tools:    []llm.ToolDefinition{{Name: llm.ToolNameBash}},
+		},
+		nil,
+		llm.AgentLoopBudget{MaxModelCalls: 3, MaxToolCalls: 2},
+		autonomy.Full,
+		0,
+		responseRecordOptions{},
+		nil,
+		false,
+		"",
+		nil,
+		attshell.AuditContext{Caller: "test"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "done", resp.Content)
+	require.Len(t, provider.requests, 2)
+	require.NotEmpty(t, messages)
+
+	var sawToolCall, sawToolResult bool
+
+	for index := range messages {
+		message := &messages[index]
+		sawToolCall = sawToolCall || len(message.ToolCalls) > 0
+		sawToolResult = sawToolResult || message.ToolResult != nil
+	}
+
+	assert.True(t, sawToolCall)
+	assert.True(t, sawToolResult)
+	assert.Greater(t, len(provider.requests[1].Messages), len(provider.requests[0].Messages))
+}
+
 func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
