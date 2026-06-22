@@ -57,6 +57,8 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	})
 
 	m.sessionState.Messages = append([]llm.Message(nil), m.history...)
+	m.sessionState.RecordProviderCall(msg.providerCall)
+
 	if msg.model != "" {
 		m.sessionState.DefaultModel = msg.model
 		if m.modelLocked && m.selectedModel != "" {

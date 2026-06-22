@@ -194,6 +194,73 @@ func TestStore_ConcurrentSavesMergeMessagesThroughEventLog(t *testing.T) {
 	assert.Contains(t, contents, "right")
 }
 
+func TestStore_SaveRecordsOrdinaryProviderCallProvenance(t *testing.T) {
+	t.Parallel()
+
+	store := NewStore(t.TempDir())
+	sessionState := New("openai/gpt-test", []llm.Message{{Role: llm.RoleUser, Content: "summarize @README.md"}})
+	call := NewProviderCall(ProviderCallRecord{
+		CompletedAt: time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC),
+		Source:      "run_once",
+		Params: llm.CompleteParams{
+			Model:          "openai/gpt-test",
+			ModelMode:      "fast",
+			ReasoningLevel: "high",
+			Messages: []llm.Message{
+				{Role: llm.RoleSystem, Content: "reference context"},
+				{Role: llm.RoleUser, Content: "summarize README"},
+			},
+			MaxTokens: 256,
+		},
+		Response: &llm.Response{
+			Content:      "summary",
+			Provider:     "openai",
+			Model:        "openai/gpt-test",
+			InputTokens:  8,
+			OutputTokens: 4,
+			StopReason:   llm.StopEndTurn,
+		},
+		FallbackModels: []string{"openai/gpt-backup"},
+		ReferencedFiles: []FileReference{{
+			Path:      "README.md",
+			Kind:      "file",
+			Source:    "context_reference",
+			SHA256:    "abc123",
+			SizeBytes: 512,
+		}},
+	})
+	require.True(t, sessionState.RecordProviderCall(call))
+	require.NoError(t, store.Save(sessionState))
+
+	data := readSessionTestFile(t, store.EventLogPath(sessionState.ID))
+	assert.Contains(t, data, string(EventProviderCallRecorded))
+	assert.Contains(t, data, `"request_messages"`)
+	assert.Contains(t, data, string(EventFileReferenceRecorded))
+
+	require.NoError(t, os.Remove(store.Path(sessionState.ID)))
+	loaded, err := store.Load(sessionState.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.ProviderCalls, 1)
+	assert.Equal(t, call.PromptHash, loaded.ProviderCalls[0].PromptHash)
+	assert.Equal(t, "openai", loaded.ProviderCalls[0].Provider)
+	assert.Equal(t, 12, loaded.ProviderCalls[0].TotalTokens)
+	require.Len(t, loaded.ProviderCalls[0].RequestMessages, 2)
+
+	export := BuildMachineReadableExport(loaded, ExportOptions{Profile: ExportProfilePrivate})
+	assert.Contains(t, export.Provenance.Providers, "openai")
+	assert.Contains(t, export.Provenance.Models, "openai/gpt-test")
+	assert.Contains(t, export.Provenance.Models, "openai/gpt-backup")
+	assert.Equal(t, 1, export.Provenance.TokenUsage.ModelCalls)
+	assert.Equal(t, 12, export.Provenance.TokenUsage.TotalTokens)
+
+	var referencedPaths []string
+	for _, file := range export.Provenance.ReferencedFiles {
+		referencedPaths = append(referencedPaths, file.Path)
+	}
+
+	assert.Contains(t, referencedPaths, "README.md")
+}
+
 func TestStore_LoadEventLogIgnoresTrailingPartialLine(t *testing.T) {
 	t.Parallel()
 

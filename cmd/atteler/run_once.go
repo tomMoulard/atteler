@@ -600,6 +600,9 @@ func runOnceWithOptions(
 		&sessionState,
 		prepared.activeAgent.name,
 		params.ModelMode,
+		params,
+		prepared.fallbackModels,
+		refCtx.Manifest,
 		resp,
 		checkpointPath,
 		outputFormat,
@@ -617,6 +620,9 @@ func finishRunOnceSuccess(
 	sessionState *session.Session,
 	agentName string,
 	modelMode string,
+	params llm.CompleteParams,
+	fallbackModels []string,
+	referenceManifest contextref.ReferenceManifest,
 	resp *llm.Response,
 	checkpointPath string,
 	outputFormat string,
@@ -629,7 +635,16 @@ func finishRunOnceSuccess(
 		return err
 	}
 
-	if err := saveRunOnceAssistantResponse(ctx, hooks, store, sessionState, agentName, resp); err != nil {
+	providerCall := session.NewProviderCall(session.ProviderCallRecord{
+		CompletedAt:     time.Now().UTC(),
+		Source:          "run_once",
+		Params:          params,
+		Response:        resp,
+		FallbackModels:  fallbackModels,
+		ReferencedFiles: sessionFileReferencesFromManifest(referenceManifest, agentName),
+	})
+
+	if err := saveRunOnceAssistantResponse(ctx, hooks, store, sessionState, agentName, resp, providerCall); err != nil {
 		finishHeadlessRun(store, headlessRun, session.HeadlessStatusFailed, err.Error())
 		return err
 	}
@@ -806,6 +821,44 @@ func configuredReferenceContextForRunOnce(
 	}, contextOptions)
 }
 
+func sessionFileReferencesFromManifest(manifest contextref.ReferenceManifest, agentName string) []session.FileReference {
+	if len(manifest.Entries) == 0 {
+		return nil
+	}
+
+	refs := make([]session.FileReference, 0, manifest.IncludedCount)
+	for index := range manifest.Entries {
+		entry := &manifest.Entries[index]
+
+		switch entry.PolicyDecision {
+		case contextref.ReferenceDecisionLoaded, contextref.ReferenceDecisionTruncated:
+		default:
+			continue
+		}
+
+		path := strings.TrimSpace(entry.ResolvedSource)
+		if path == "" {
+			path = strings.TrimSpace(entry.Source)
+		}
+
+		if path == "" {
+			continue
+		}
+
+		refs = append(refs, session.FileReference{
+			Path:        path,
+			LogicalPath: strings.TrimSpace(entry.Source),
+			Kind:        strings.TrimSpace(entry.Kind),
+			Source:      "context_reference",
+			SourceAgent: strings.TrimSpace(agentName),
+			SHA256:      strings.TrimSpace(entry.DigestSHA256),
+			SizeBytes:   int64(entry.Bytes),
+		})
+	}
+
+	return refs
+}
+
 func prepareRunOnceRequest(
 	ctx context.Context,
 	reg *llm.Registry,
@@ -973,12 +1026,14 @@ func saveRunOnceAssistantResponse(
 	sessionState *session.Session,
 	agentName string,
 	resp *llm.Response,
+	providerCall session.ProviderCall,
 ) error {
 	if err := authorizeSessionStoreWrite(ctx, store, *sessionState, "save assistant session response"); err != nil {
 		return fmt.Errorf("save session after response: %w", err)
 	}
 
 	sessionState.Append(llm.RoleAssistant, resp.Content)
+	sessionState.RecordProviderCall(providerCall)
 
 	if resp.Model != "" {
 		sessionState.DefaultModel = resp.Model

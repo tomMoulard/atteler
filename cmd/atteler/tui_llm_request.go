@@ -15,6 +15,7 @@ import (
 	"github.com/tommoulard/atteler/pkg/events"
 	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/permission"
+	"github.com/tommoulard/atteler/pkg/session"
 	attshell "github.com/tommoulard/atteler/pkg/shell"
 )
 
@@ -76,15 +77,25 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 		var usage tokenUsage
 		usage.addResponse(resp)
 
+		completedAt := time.Now()
+
 		return finishLLMResponse(request.liveCh, llmResponseMsg{
-			completedAt:             time.Now(),
+			completedAt:             completedAt,
 			content:                 resp.Content,
 			provider:                resp.Provider,
 			model:                   resp.Model,
 			eventLines:              eventLines.Lines(),
 			providerFailureMetadata: resp.ProviderFailureMetadata(),
 			routeDecision:           routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
-			tokenUsage:              usage,
+			providerCall: session.NewProviderCall(session.ProviderCallRecord{
+				CompletedAt:     completedAt,
+				Source:          "tui",
+				Params:          params,
+				Response:        resp,
+				FallbackModels:  request.fallbackModels,
+				ReferencedFiles: sessionFileReferencesFromLLMRequest(request),
+			}),
+			tokenUsage: usage,
 		})
 	}
 }
@@ -320,18 +331,44 @@ func callLLMWithTools(
 	var usage tokenUsage
 	usage.addResponse(resp)
 
+	completedAt := time.Now()
+
 	return llmResponseMsg{
-		completedAt:             time.Now(),
+		completedAt:             completedAt,
 		content:                 resp.Content,
 		provider:                resp.Provider,
 		model:                   resp.Model,
 		eventLines:              eventLines.Lines(),
 		providerFailureMetadata: resp.ProviderFailureMetadata(),
 		routeDecision:           routeDecisionWithResponse(request.routeDecision, resp, routeTelemetryFromRegistry(reg)),
-		toolLog:                 toolLog,
-		tokenUsage:              usage,
-		liveEvents:              request.liveCh != nil,
+		providerCall: session.NewProviderCall(session.ProviderCallRecord{
+			CompletedAt:     completedAt,
+			Source:          "tui_agent_loop",
+			Params:          params,
+			Response:        resp,
+			FallbackModels:  request.fallbackModels,
+			ReferencedFiles: sessionFileReferencesFromLLMRequest(request),
+		}),
+		toolLog:    toolLog,
+		tokenUsage: usage,
+		liveEvents: request.liveCh != nil,
 	}
+}
+
+func sessionFileReferencesFromLLMRequest(request llmRequest) []session.FileReference {
+	if len(request.inlineReferenceEvents) == 0 {
+		return sessionFileReferencesFromManifest(request.referenceManifest, request.eventBase.Agent)
+	}
+
+	referenceEvents := append([]contextref.ReferenceEvent(nil), request.referenceManifest.Entries...)
+	referenceEvents = append(referenceEvents, request.inlineReferenceEvents...)
+
+	manifest := contextref.BuildReferenceManifest(referenceEvents)
+	if manifest.TokenEstimator == "" {
+		manifest.TokenEstimator = request.referenceManifest.TokenEstimator
+	}
+
+	return sessionFileReferencesFromManifest(manifest, request.eventBase.Agent)
 }
 
 func contextWithPermissionPolicyPrompt(ctx context.Context, request llmRequest) context.Context {

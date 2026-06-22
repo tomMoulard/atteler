@@ -133,6 +133,7 @@ type ExportTokenUsage struct {
 	ModelCalls            int   `json:"model_calls,omitempty"`
 	InputTokens           int   `json:"input_tokens,omitempty"`
 	CachedInputTokens     int   `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int   `json:"cache_write_input_tokens,omitempty"`
 	OutputTokens          int   `json:"output_tokens,omitempty"`
 	TotalTokens           int   `json:"total_tokens,omitempty"`
 	EstimatedInputTokens  int   `json:"estimated_input_tokens,omitempty"`
@@ -1546,6 +1547,7 @@ func writeProvenanceTokenUsage(b *strings.Builder, usage ExportTokenUsage) {
 	if usage.ModelCalls == 0 &&
 		usage.InputTokens == 0 &&
 		usage.CachedInputTokens == 0 &&
+		usage.CacheWriteInputTokens == 0 &&
 		usage.OutputTokens == 0 &&
 		usage.TotalTokens == 0 &&
 		usage.EstimatedInputTokens == 0 &&
@@ -1557,10 +1559,11 @@ func writeProvenanceTokenUsage(b *strings.Builder, usage ExportTokenUsage) {
 
 	fmt.Fprintf(
 		b,
-		"- **Token usage:** model_calls=%d input=%d cached_input=%d output=%d total=%d estimated_input=%d estimated_output=%d estimated_total=%d estimated_cost_micros=%d\n",
+		"- **Token usage:** model_calls=%d input=%d cached_input=%d cache_write_input=%d output=%d total=%d estimated_input=%d estimated_output=%d estimated_total=%d estimated_cost_micros=%d\n",
 		usage.ModelCalls,
 		usage.InputTokens,
 		usage.CachedInputTokens,
+		usage.CacheWriteInputTokens,
 		usage.OutputTokens,
 		usage.TotalTokens,
 		usage.EstimatedInputTokens,
@@ -2518,6 +2521,16 @@ func sessionProviders(sessionState Session) []string {
 		providerFromModel(sessionState.DefaultModel),
 	}
 
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		values = append(
+			values,
+			call.Provider,
+			providerFromModel(call.RequestedModel),
+			providerFromModel(call.ResponseModel),
+		)
+	}
+
 	if sessionState.BackgroundSuggestions != nil {
 		values = append(values, sessionState.BackgroundSuggestions.LastProvider)
 	}
@@ -2551,6 +2564,12 @@ func sessionProviders(sessionState Session) []string {
 
 func sessionModels(sessionState Session) []string {
 	values := []string{sessionState.DefaultModel}
+
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		values = append(values, call.RequestedModel, call.ResponseModel)
+		values = append(values, call.FallbackModels...)
+	}
 
 	if sessionState.BackgroundSuggestions != nil {
 		values = append(values, sessionState.BackgroundSuggestions.LastModel)
@@ -2587,10 +2606,23 @@ func sessionModels(sessionState Session) []string {
 func sessionTokenUsage(sessionState Session) ExportTokenUsage {
 	var usage ExportTokenUsage
 
+	for index := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[index]
+		usage.ModelCalls++
+		usage.InputTokens += call.InputTokens
+		usage.CachedInputTokens += call.CachedInputTokens
+		usage.CacheWriteInputTokens += call.CacheWriteInputTokens
+		usage.OutputTokens += call.OutputTokens
+		usage.TotalTokens += call.TotalTokens
+		usage.EstimatedInputTokens += call.EstimatedInputTokens
+		usage.EstimatedOutputTokens += call.EstimatedOutputTokens
+	}
+
 	if sessionState.BackgroundSuggestions != nil {
 		usage.ModelCalls += sessionState.BackgroundSuggestions.ProviderCalls
 		usage.InputTokens += sessionState.BackgroundSuggestions.InputTokens
 		usage.CachedInputTokens += sessionState.BackgroundSuggestions.CachedInputTokens
+		usage.CacheWriteInputTokens += sessionState.BackgroundSuggestions.CacheWriteInputTokens
 		usage.OutputTokens += sessionState.BackgroundSuggestions.OutputTokens
 		usage.EstimatedInputTokens += sessionState.BackgroundSuggestions.EstimatedInputTokens
 		usage.EstimatedOutputTokens += sessionState.BackgroundSuggestions.EstimatedOutputTokens
@@ -2680,6 +2712,13 @@ func sessionFileReferences(sessionState Session) []ExportFileReference {
 		})
 	}
 
+	for callIndex := range sessionState.ProviderCalls {
+		call := &sessionState.ProviderCalls[callIndex]
+		for refIndex := range call.ReferencedFiles {
+			entries = append(entries, exportFileReferenceFromSessionReference(call.ReferencedFiles[refIndex]))
+		}
+	}
+
 	for index := range sessionState.Artifacts {
 		artifact := &sessionState.Artifacts[index]
 		if strings.TrimSpace(artifact.Path) == "" {
@@ -2715,6 +2754,10 @@ func sessionFileReferences(sessionState Session) []ExportFileReference {
 	}
 
 	return uniqueFileReferences(entries)
+}
+
+func exportFileReferenceFromSessionReference(ref FileReference) ExportFileReference {
+	return ExportFileReference(ref)
 }
 
 func sessionVerificationGates(sessionState Session) []ExportVerificationGate {

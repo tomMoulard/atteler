@@ -69,6 +69,7 @@ type Session struct {
 	WorktreeBase          string                     `json:"worktree_base,omitempty"`
 	Tags                  []string                   `json:"tags,omitempty"`
 	Messages              []llm.Message              `json:"messages"`
+	ProviderCalls         []ProviderCall             `json:"provider_calls,omitempty" yaml:"provider_calls,omitempty"`
 	NegativeKnowledge     []NegativeKnowledge        `json:"negative_knowledge,omitempty" yaml:"negative_knowledge,omitempty"`
 	Evaluations           []AgentEvaluation          `json:"evaluations,omitempty" yaml:"evaluations,omitempty"`
 	Artifacts             []Artifact                 `json:"artifacts,omitempty" yaml:"artifacts,omitempty"`
@@ -87,6 +88,71 @@ type EventLogMetadata struct {
 	EventCount    int    `json:"event_count,omitempty" yaml:"event_count,omitempty"`
 	LastSequence  int64  `json:"last_sequence,omitempty" yaml:"last_sequence,omitempty"`
 	TruncatedTail bool   `json:"truncated_tail,omitempty" yaml:"truncated_tail,omitempty"`
+}
+
+// ProviderCall records one LLM provider request/response pair that influenced
+// replay. RequestMessages are intentionally kept in the durable local record so
+// replay can reconstruct the exact prompt after reference-context injection.
+type ProviderCall struct {
+	StartedAt               time.Time       `json:"started_at,omitzero" yaml:"started_at,omitempty"`
+	CompletedAt             time.Time       `json:"completed_at,omitzero" yaml:"completed_at,omitempty"`
+	ID                      string          `json:"id" yaml:"id"`
+	Source                  string          `json:"source,omitempty" yaml:"source,omitempty"`
+	Provider                string          `json:"provider,omitempty" yaml:"provider,omitempty"`
+	RequestedModel          string          `json:"requested_model,omitempty" yaml:"requested_model,omitempty"`
+	ResponseModel           string          `json:"response_model,omitempty" yaml:"response_model,omitempty"`
+	ModelMode               string          `json:"model_mode,omitempty" yaml:"model_mode,omitempty"`
+	ReasoningLevel          string          `json:"reasoning_level,omitempty" yaml:"reasoning_level,omitempty"`
+	PromptHash              string          `json:"prompt_hash,omitempty" yaml:"prompt_hash,omitempty"`
+	ConfigHash              string          `json:"config_hash,omitempty" yaml:"config_hash,omitempty"`
+	ResponseHash            string          `json:"response_hash,omitempty" yaml:"response_hash,omitempty"`
+	StopReason              llm.StopReason  `json:"stop_reason,omitempty" yaml:"stop_reason,omitempty"`
+	RequestMessages         []llm.Message   `json:"request_messages,omitempty" yaml:"request_messages,omitempty"`
+	FallbackModels          []string        `json:"fallback_models,omitempty" yaml:"fallback_models,omitempty"`
+	ReferencedFiles         []FileReference `json:"referenced_files,omitempty" yaml:"referenced_files,omitempty"`
+	InputTokens             int             `json:"input_tokens,omitempty" yaml:"input_tokens,omitempty"`
+	CachedInputTokens       int             `json:"cached_input_tokens,omitempty" yaml:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens   int             `json:"cache_write_input_tokens,omitempty" yaml:"cache_write_input_tokens,omitempty"`
+	OutputTokens            int             `json:"output_tokens,omitempty" yaml:"output_tokens,omitempty"`
+	TotalTokens             int             `json:"total_tokens,omitempty" yaml:"total_tokens,omitempty"`
+	EstimatedInputTokens    int             `json:"estimated_input_tokens,omitempty" yaml:"estimated_input_tokens,omitempty"`
+	EstimatedOutputTokens   int             `json:"estimated_output_tokens,omitempty" yaml:"estimated_output_tokens,omitempty"`
+	MaxOutputTokens         int             `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+	RequestMessageCount     int             `json:"request_message_count,omitempty" yaml:"request_message_count,omitempty"`
+	RequestToolCount        int             `json:"request_tool_count,omitempty" yaml:"request_tool_count,omitempty"`
+	ResponseToolCallCount   int             `json:"response_tool_call_count,omitempty" yaml:"response_tool_call_count,omitempty"`
+	DurationMillis          int64           `json:"duration_millis,omitempty" yaml:"duration_millis,omitempty"`
+	FirstTokenLatencyMillis int64           `json:"first_token_latency_millis,omitempty" yaml:"first_token_latency_millis,omitempty"`
+}
+
+// ProviderCallRecord describes the request/response data used to create a
+// provider-call audit entry.
+//
+//nolint:govet // Field order follows caller data flow rather than pointer packing.
+type ProviderCallRecord struct {
+	StartedAt       time.Time
+	CompletedAt     time.Time
+	Source          string
+	Params          llm.CompleteParams
+	Response        *llm.Response
+	FallbackModels  []string
+	ReferencedFiles []FileReference
+}
+
+// FileReference records a replay-relevant file, URL, or artifact reference.
+//
+//nolint:govet // JSON/YAML field order keeps path identity before provenance metadata.
+type FileReference struct {
+	Path            string `json:"path" yaml:"path"`
+	LogicalPath     string `json:"logical_path,omitempty" yaml:"logical_path,omitempty"`
+	Kind            string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Source          string `json:"source,omitempty" yaml:"source,omitempty"`
+	SourceAgent     string `json:"source_agent,omitempty" yaml:"source_agent,omitempty"`
+	SourceSessionID string `json:"source_session_id,omitempty" yaml:"source_session_id,omitempty"`
+	SHA256          string `json:"sha256,omitempty" yaml:"sha256,omitempty"`
+	SizeBytes       int64  `json:"size_bytes,omitempty" yaml:"size_bytes,omitempty"`
+	WorktreeBranch  string `json:"worktree_branch,omitempty" yaml:"worktree_branch,omitempty"`
+	WorktreeBase    string `json:"worktree_base,omitempty" yaml:"worktree_base,omitempty"`
 }
 
 // BackgroundSuggestionUsage stores usage for background prompt suggestion calls
@@ -801,6 +867,319 @@ func (s *Store) Migrate(ref string) error {
 // Append adds a message to the session.
 func (s *Session) Append(role llm.Role, content string) {
 	s.Messages = append(s.Messages, llm.Message{Role: role, Content: content})
+}
+
+// NewProviderCall builds a provider-call audit record from one completion
+// request/response pair. It records the final request messages after all
+// system/reference/tool context injection so replay can explain the exact
+// provider prompt that produced the response.
+func NewProviderCall(record ProviderCallRecord) ProviderCall {
+	completedAt := record.CompletedAt
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	} else {
+		completedAt = completedAt.UTC()
+	}
+
+	startedAt := record.StartedAt
+	if startedAt.IsZero() && record.Response != nil && record.Response.Latency > 0 {
+		startedAt = completedAt.Add(-record.Response.Latency)
+	}
+
+	if !startedAt.IsZero() {
+		startedAt = startedAt.UTC()
+	}
+
+	requestMessages := append([]llm.Message(nil), record.Params.Messages...)
+	responseModel := ""
+	provider := ""
+	stopReason := llm.StopReason("")
+	responseHash := ""
+	durationMillis := int64(0)
+	firstTokenLatencyMillis := int64(0)
+	inputTokens := 0
+	cachedInputTokens := 0
+	cacheWriteInputTokens := 0
+	outputTokens := 0
+	responseToolCalls := 0
+
+	if record.Response != nil {
+		responseModel = strings.TrimSpace(record.Response.Model)
+		provider = strings.TrimSpace(record.Response.Provider)
+		stopReason = record.Response.StopReason
+		responseHash = hashJSON(record.Response.Content)
+		durationMillis = durationToMillis(record.Response.Latency)
+		firstTokenLatencyMillis = durationToMillis(record.Response.FirstTokenLatency)
+		inputTokens = max(record.Response.InputTokens, 0)
+		cachedInputTokens = max(record.Response.CachedInputTokens, 0)
+		cacheWriteInputTokens = max(record.Response.CacheWriteInputTokens, 0)
+		outputTokens = max(record.Response.OutputTokens, 0)
+		responseToolCalls = len(record.Response.ToolCalls)
+	}
+
+	model := firstNonEmptyString(responseModel, record.Params.Model)
+	if provider == "" {
+		provider = providerFromModel(model)
+	}
+
+	call := ProviderCall{
+		StartedAt:               startedAt,
+		CompletedAt:             completedAt,
+		ID:                      newID(completedAt),
+		Source:                  strings.TrimSpace(record.Source),
+		Provider:                provider,
+		RequestedModel:          strings.TrimSpace(record.Params.Model),
+		ResponseModel:           responseModel,
+		ModelMode:               strings.TrimSpace(record.Params.ModelMode),
+		ReasoningLevel:          strings.TrimSpace(record.Params.ReasoningLevel),
+		PromptHash:              hashJSON(requestMessages),
+		ConfigHash:              providerCallConfigHash(record.Params, record.FallbackModels),
+		ResponseHash:            responseHash,
+		StopReason:              stopReason,
+		RequestMessages:         requestMessages,
+		FallbackModels:          append([]string(nil), record.FallbackModels...),
+		ReferencedFiles:         cloneFileReferences(record.ReferencedFiles),
+		InputTokens:             inputTokens,
+		CachedInputTokens:       cachedInputTokens,
+		CacheWriteInputTokens:   cacheWriteInputTokens,
+		OutputTokens:            outputTokens,
+		TotalTokens:             inputTokens + outputTokens,
+		EstimatedInputTokens:    llm.EstimateTokens(requestMessages),
+		MaxOutputTokens:         max(record.Params.MaxTokens, 0),
+		RequestMessageCount:     len(requestMessages),
+		RequestToolCount:        len(record.Params.Tools),
+		ResponseToolCallCount:   responseToolCalls,
+		DurationMillis:          durationMillis,
+		FirstTokenLatencyMillis: firstTokenLatencyMillis,
+	}
+
+	if call.Source == "" {
+		call.Source = "session"
+	}
+
+	return call
+}
+
+func providerCallConfigHash(params llm.CompleteParams, fallbackModels []string) string {
+	//nolint:govet // Hash field order is intentionally stable for replay.
+	config := struct {
+		Temperature    *float64            `json:"temperature,omitempty"`
+		TopP           *float64            `json:"top_p,omitempty"`
+		Seed           *int                `json:"seed,omitempty"`
+		ResponseFormat *llm.ResponseFormat `json:"response_format,omitempty"`
+		Model          string              `json:"model,omitempty"`
+		ModelMode      string              `json:"model_mode,omitempty"`
+		ReasoningLevel string              `json:"reasoning_level,omitempty"`
+		FallbackModels []string            `json:"fallback_models,omitempty"`
+		Stop           []string            `json:"stop,omitempty"`
+		MaxTokens      int                 `json:"max_tokens,omitempty"`
+		ToolNames      []string            `json:"tool_names,omitempty"`
+	}{
+		Temperature:    params.Temperature,
+		TopP:           params.TopP,
+		Seed:           params.Seed,
+		ResponseFormat: params.ResponseFormat,
+		Model:          strings.TrimSpace(params.Model),
+		ModelMode:      strings.TrimSpace(params.ModelMode),
+		ReasoningLevel: strings.TrimSpace(params.ReasoningLevel),
+		FallbackModels: append([]string(nil), fallbackModels...),
+		Stop:           append([]string(nil), params.Stop...),
+		MaxTokens:      max(params.MaxTokens, 0),
+		ToolNames:      toolDefinitionNames(params.Tools),
+	}
+
+	return hashJSON(config)
+}
+
+func toolDefinitionNames(tools []llm.ToolDefinition) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	return names
+}
+
+func durationToMillis(duration time.Duration) int64 {
+	if duration <= 0 {
+		return 0
+	}
+
+	return int64(duration / time.Millisecond)
+}
+
+// RecordProviderCall appends a provider-call audit entry unless the same call
+// was already recorded.
+func (s *Session) RecordProviderCall(call ProviderCall) bool {
+	call = normalizeProviderCall(call)
+	if !providerCallHasEvidence(call) {
+		return false
+	}
+
+	if strings.TrimSpace(call.ID) == "" {
+		return false
+	}
+
+	key := providerCallIdentity(call)
+
+	for index := range s.ProviderCalls {
+		existing := &s.ProviderCalls[index]
+		if providerCallIdentity(*existing) == key {
+			return false
+		}
+	}
+
+	s.ProviderCalls = append(s.ProviderCalls, call)
+
+	return true
+}
+
+func providerCallHasEvidence(call ProviderCall) bool {
+	return strings.TrimSpace(call.Provider) != "" ||
+		strings.TrimSpace(call.RequestedModel) != "" ||
+		strings.TrimSpace(call.ResponseModel) != "" ||
+		strings.TrimSpace(call.PromptHash) != "" ||
+		strings.TrimSpace(call.ResponseHash) != "" ||
+		call.InputTokens > 0 ||
+		call.OutputTokens > 0 ||
+		call.TotalTokens > 0 ||
+		call.RequestMessageCount > 0 ||
+		len(call.RequestMessages) > 0
+}
+
+func normalizeProviderCall(call ProviderCall) ProviderCall {
+	if call.CompletedAt.IsZero() {
+		call.CompletedAt = time.Now().UTC()
+	} else {
+		call.CompletedAt = call.CompletedAt.UTC()
+	}
+
+	if !call.StartedAt.IsZero() {
+		call.StartedAt = call.StartedAt.UTC()
+	}
+
+	if strings.TrimSpace(call.ID) == "" {
+		call.ID = newID(call.CompletedAt)
+	}
+
+	call.Source = strings.TrimSpace(call.Source)
+	if call.Source == "" {
+		call.Source = "session"
+	}
+
+	call.Provider = strings.TrimSpace(call.Provider)
+	call.RequestedModel = strings.TrimSpace(call.RequestedModel)
+	call.ResponseModel = strings.TrimSpace(call.ResponseModel)
+	call.ModelMode = strings.TrimSpace(call.ModelMode)
+	call.ReasoningLevel = strings.TrimSpace(call.ReasoningLevel)
+	call.PromptHash = strings.TrimSpace(call.PromptHash)
+	call.ConfigHash = strings.TrimSpace(call.ConfigHash)
+	call.ResponseHash = strings.TrimSpace(call.ResponseHash)
+
+	if call.Provider == "" {
+		call.Provider = providerFromModel(firstNonEmptyString(call.ResponseModel, call.RequestedModel))
+	}
+
+	if call.PromptHash == "" && len(call.RequestMessages) > 0 {
+		call.PromptHash = hashJSON(call.RequestMessages)
+	}
+
+	if call.RequestMessageCount == 0 {
+		call.RequestMessageCount = len(call.RequestMessages)
+	}
+
+	call.FallbackModels = compactStringSlice(call.FallbackModels)
+	call.ReferencedFiles = cloneFileReferences(call.ReferencedFiles)
+	call.RequestMessages = append([]llm.Message(nil), call.RequestMessages...)
+	call.InputTokens = max(call.InputTokens, 0)
+	call.CachedInputTokens = max(call.CachedInputTokens, 0)
+	call.CacheWriteInputTokens = max(call.CacheWriteInputTokens, 0)
+	call.OutputTokens = max(call.OutputTokens, 0)
+	call.TotalTokens = max(call.TotalTokens, 0)
+
+	if call.TotalTokens == 0 {
+		call.TotalTokens = call.InputTokens + call.OutputTokens
+	}
+
+	call.EstimatedInputTokens = max(call.EstimatedInputTokens, 0)
+	call.EstimatedOutputTokens = max(call.EstimatedOutputTokens, 0)
+	call.MaxOutputTokens = max(call.MaxOutputTokens, 0)
+	call.RequestToolCount = max(call.RequestToolCount, 0)
+	call.ResponseToolCallCount = max(call.ResponseToolCallCount, 0)
+	call.DurationMillis = maxInt64(call.DurationMillis, 0)
+	call.FirstTokenLatencyMillis = maxInt64(call.FirstTokenLatencyMillis, 0)
+
+	return call
+}
+
+func providerCallIdentity(call ProviderCall) string {
+	return strings.Join([]string{
+		call.ID,
+		call.Source,
+		call.Provider,
+		call.RequestedModel,
+		call.ResponseModel,
+		call.PromptHash,
+		call.ResponseHash,
+		call.CompletedAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+}
+
+func compactStringSlice(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+
+	return out
+}
+
+func cloneFileReferences(refs []FileReference) []FileReference {
+	if len(refs) == 0 {
+		return nil
+	}
+
+	out := make([]FileReference, 0, len(refs))
+	for i := range refs {
+		ref := normalizeFileReference(refs[i])
+		if strings.TrimSpace(ref.Path) != "" {
+			out = append(out, ref)
+		}
+	}
+
+	return out
+}
+
+func normalizeFileReference(ref FileReference) FileReference {
+	ref.Path = strings.TrimSpace(ref.Path)
+	ref.LogicalPath = strings.TrimSpace(ref.LogicalPath)
+	ref.Kind = strings.TrimSpace(ref.Kind)
+	ref.Source = strings.TrimSpace(ref.Source)
+	ref.SourceAgent = strings.TrimSpace(ref.SourceAgent)
+	ref.SourceSessionID = strings.TrimSpace(ref.SourceSessionID)
+	ref.SHA256 = strings.ToLower(strings.TrimSpace(ref.SHA256))
+	ref.WorktreeBranch = strings.TrimSpace(ref.WorktreeBranch)
+	ref.WorktreeBase = strings.TrimSpace(ref.WorktreeBase)
+
+	if ref.SizeBytes < 0 {
+		ref.SizeBytes = 0
+	}
+
+	return ref
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+
+	return right
 }
 
 // RecordBackgroundSuggestionUsage records one background suggestion attempt

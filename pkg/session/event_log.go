@@ -116,22 +116,23 @@ type messageEvent struct {
 	Index   int         `json:"index"`
 }
 
-//nolint:govet // Serialized provider-call fields are grouped by replay meaning.
 type providerCallEvent struct {
-	Call       MultiAgentRunCall `json:"call"`
-	RunID      string            `json:"run_id,omitempty"`
-	RunKind    string            `json:"run_kind,omitempty"`
-	Provider   string            `json:"provider,omitempty"`
-	Model      string            `json:"model,omitempty"`
-	TokenUsage tokenUsageEvent   `json:"token_usage,omitzero"`
+	SessionCall *ProviderCall      `json:"session_call,omitempty"`
+	Call        *MultiAgentRunCall `json:"call,omitempty"`
+	RunID       string             `json:"run_id,omitempty"`
+	RunKind     string             `json:"run_kind,omitempty"`
+	Provider    string             `json:"provider,omitempty"`
+	Model       string             `json:"model,omitempty"`
+	TokenUsage  tokenUsageEvent    `json:"token_usage,omitzero"`
 }
 
 type tokenUsageEvent struct {
-	InputTokens         int   `json:"input_tokens,omitempty"`
-	CachedInputTokens   int   `json:"cached_input_tokens,omitempty"`
-	OutputTokens        int   `json:"output_tokens,omitempty"`
-	TotalTokens         int   `json:"total_tokens,omitempty"`
-	EstimatedCostMicros int64 `json:"estimated_cost_micros,omitempty"`
+	InputTokens           int   `json:"input_tokens,omitempty"`
+	CachedInputTokens     int   `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int   `json:"cache_write_input_tokens,omitempty"`
+	OutputTokens          int   `json:"output_tokens,omitempty"`
+	TotalTokens           int   `json:"total_tokens,omitempty"`
+	EstimatedCostMicros   int64 `json:"estimated_cost_micros,omitempty"`
 }
 
 type toolCallEvent struct {
@@ -156,6 +157,10 @@ type fileReferenceEvent struct {
 	SizeBytes       int64  `json:"size_bytes,omitempty"`
 	WorktreeBranch  string `json:"worktree_branch,omitempty"`
 	WorktreeBase    string `json:"worktree_base,omitempty"`
+}
+
+func fileReferenceEventFromReference(ref FileReference) fileReferenceEvent {
+	return fileReferenceEvent(ref)
 }
 
 type artifactEvent struct {
@@ -409,6 +414,8 @@ func pendingEventsForSession(sessionState Session) []pendingEvent {
 		}
 	}
 
+	events = append(events, providerCallEventsForSession(now, sessionState.ProviderCalls)...)
+
 	for index, failure := range sessionState.NegativeKnowledge {
 		events = append(events, mustPendingEvent(now, EventFailureRecorded, failureEvent{
 			Index:   index,
@@ -470,6 +477,28 @@ func pendingEventsForSession(sessionState Session) []pendingEvent {
 		events = append(events, mustPendingEvent(now, EventBackgroundUsageRecorded, backgroundSuggestionEvent{
 			Usage: *sessionState.BackgroundSuggestions,
 		}))
+	}
+
+	return events
+}
+
+func providerCallEventsForSession(at time.Time, calls []ProviderCall) []pendingEvent {
+	if len(calls) == 0 {
+		return nil
+	}
+
+	events := make([]pendingEvent, 0, len(calls))
+	for index := range calls {
+		call := normalizeProviderCall(calls[index])
+		events = append(events, mustPendingEvent(at, EventProviderCallRecorded, providerCallFromSession(call)))
+
+		for refIndex := range call.ReferencedFiles {
+			events = append(events, mustPendingEvent(
+				at,
+				EventFileReferenceRecorded,
+				fileReferenceEventFromReference(call.ReferencedFiles[refIndex]),
+			))
+		}
 	}
 
 	return events
@@ -539,7 +568,7 @@ func providerCallFromRun(run MultiAgentRun, call MultiAgentRunCall) providerCall
 	return providerCallEvent{
 		RunID:    run.ID,
 		RunKind:  run.Kind,
-		Call:     call,
+		Call:     &call,
 		Model:    model,
 		Provider: providerFromModel(model),
 		TokenUsage: tokenUsageEvent{
@@ -548,6 +577,24 @@ func providerCallFromRun(run MultiAgentRun, call MultiAgentRunCall) providerCall
 			OutputTokens:        call.OutputTokens,
 			TotalTokens:         call.TotalTokens,
 			EstimatedCostMicros: call.EstimatedCostMicros,
+		},
+	}
+}
+
+func providerCallFromSession(call ProviderCall) providerCallEvent {
+	model := firstNonEmptyString(call.ResponseModel, call.RequestedModel)
+
+	return providerCallEvent{
+		SessionCall: &call,
+		Model:       model,
+		Provider:    firstNonEmptyString(call.Provider, providerFromModel(model)),
+		TokenUsage: tokenUsageEvent{
+			InputTokens:           call.InputTokens,
+			CachedInputTokens:     call.CachedInputTokens,
+			CacheWriteInputTokens: call.CacheWriteInputTokens,
+			OutputTokens:          call.OutputTokens,
+			TotalTokens:           call.TotalTokens,
+			EstimatedCostMicros:   0,
 		},
 	}
 }
@@ -578,6 +625,7 @@ func replayEvents(events []Event) (Session, error) {
 	var sessionState Session
 
 	seenMessages := make(map[string]struct{})
+	seenProviderCalls := make(map[string]struct{})
 	seenFailures := make(map[string]struct{})
 	seenEvaluations := make(map[string]struct{})
 	artifactIndexes := make(map[string]int)
@@ -614,6 +662,26 @@ func replayEvents(events []Event) (Session, error) {
 			seenMessages[key] = struct{}{}
 
 			sessionState.Messages = append(sessionState.Messages, payload.Message)
+		case EventProviderCallRecorded:
+			var payload providerCallEvent
+			if err := unmarshalEventPayload(event, &payload); err != nil {
+				return Session{}, err
+			}
+
+			if payload.SessionCall == nil {
+				continue
+			}
+
+			call := normalizeProviderCall(*payload.SessionCall)
+
+			key := providerCallIdentity(call)
+			if _, ok := seenProviderCalls[key]; ok {
+				continue
+			}
+
+			seenProviderCalls[key] = struct{}{}
+
+			sessionState.ProviderCalls = append(sessionState.ProviderCalls, call)
 		case EventFailureRecorded:
 			var payload failureEvent
 			if err := unmarshalEventPayload(event, &payload); err != nil {
@@ -671,8 +739,7 @@ func replayEvents(events []Event) (Session, error) {
 
 			usage := payload.Usage
 			sessionState.BackgroundSuggestions = &usage
-		case EventProviderCallRecorded,
-			EventToolCallRecorded,
+		case EventToolCallRecorded,
 			EventToolResultRecorded,
 			EventFileReferenceRecorded,
 			EventWorktreeActionRecorded,
