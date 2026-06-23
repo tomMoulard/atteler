@@ -420,6 +420,23 @@ func TestAgent_FilterTools_CapabilityPermissions(t *testing.T) {
 	assert.False(t, a.HasToolPermission("future-default-tool"), "capability grants must not allow unknown future tools")
 }
 
+func TestAgent_FilterTools_DoesNotGrantNewDefaultToolAutomatically(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name:            "old-reader",
+		ToolPermissions: map[string]bool{"read": true},
+	}
+
+	// Simulate a future release adding another advertised default tool. A
+	// capability grant for today's read tools must not become an implicit grant
+	// for that future tool.
+	tools := append(llm.DefaultTools(), llm.ToolDefinition{Name: "future-default-tool"})
+
+	assert.NotContains(t, a.EffectiveToolNames(tools), "future-default-tool")
+	assert.False(t, a.HasToolPermission("future-default-tool"))
+}
+
 func TestAgent_HasToolPermission_AllowAllCompatibilityMode(t *testing.T) {
 	t.Parallel()
 

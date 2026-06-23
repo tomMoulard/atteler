@@ -379,9 +379,27 @@ func TestPromptCompletionContext_ExposesEffectiveAgentPermissions(t *testing.T) 
 	}, "ask reviewer", false)
 
 	texts := candidateTexts(completionContext.Permissions)
+	assert.Contains(t, texts, "tool-policy:deny")
 	assert.Contains(t, texts, "read")
 	assert.Contains(t, texts, "search")
 	assert.Contains(t, texts, "grep")
+	assert.NotContains(t, texts, "bash")
+}
+
+func TestPromptCompletionContext_ExposesNoEffectiveAgentTools(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]config.AgentConfig{
+		"reviewer": {Description: "configured without tools"},
+	})
+	completionContext := promptCompletionContext(context.Background(), appState{
+		agentRegistry: registry,
+		selectedAgent: "reviewer",
+	}, "ask reviewer", false)
+
+	texts := candidateTexts(completionContext.Permissions)
+	assert.Contains(t, texts, "tool-policy:deny")
+	assert.Contains(t, texts, "tools:none")
 	assert.NotContains(t, texts, "bash")
 }
 

@@ -466,6 +466,15 @@ func promptPermissionCandidates(registry *agent.Registry, selectedAgent string) 
 	}
 
 	seen := make(map[string]bool)
+	toolPolicy := activeAgent.ToolPolicySummary()
+	out = append(out, promptcomplete.Candidate{
+		Text:        "tool-policy:" + toolPolicy,
+		Kind:        "permission",
+		Source:      "agent tool policy",
+		Description: selectedAgent + " effective tool policy is " + toolPolicy,
+		Tokens:      []string{"tool-policy", "permission", selectedAgent},
+	})
+
 	for _, name := range activeAgent.EffectivePermissionNames() {
 		if seen[name] {
 			continue
@@ -493,6 +502,16 @@ func promptPermissionCandidates(registry *agent.Registry, selectedAgent string) 
 			Source:      "agent effective tools",
 			Description: selectedAgent + " is effectively allowed to use tool " + name,
 			Tokens:      []string{"tool", "allowed", selectedAgent},
+		})
+	}
+
+	if len(seen) == 0 {
+		out = append(out, promptcomplete.Candidate{
+			Text:        "tools:none",
+			Kind:        "permission",
+			Source:      "agent effective tools",
+			Description: selectedAgent + " is effectively allowed to use no tools",
+			Tokens:      []string{"tool", "denied", selectedAgent},
 		})
 	}
 
