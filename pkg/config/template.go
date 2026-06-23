@@ -236,7 +236,8 @@ func templateYAML() string {
 
 	var out strings.Builder
 	out.WriteString("# Atteler configuration\n")
-	out.WriteString("# Save as ~/.config/atteler/config.yaml, ./.atteler/config.yaml, or ./.atteler.yaml.\n")
+	out.WriteString("# Save as ~/.config/atteler/config.yaml for global config.\n")
+	out.WriteString("# Use ./.atteler/config.yaml for ignored/private local config, or ./.atteler.yaml for reviewed shared config.\n")
 	out.WriteString("# Generated from the current config schema and starter defaults.\n")
 	out.WriteString("# Use `atteler config explain` to inspect implicit defaults and merge provenance.\n")
 	out.WriteString("# Lifecycle hook payload defaults to metadata: no prompt text, command output, file paths, or raw errors.\n")
