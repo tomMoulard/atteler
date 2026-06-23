@@ -33,6 +33,7 @@
 
 # Adjacent Atteler state/temp files can appear when ATTELER_STATE points at the repo.
 /.atteler-state*
+/.atteler-config-*.tmp
 
 # Nested/generated Atteler stores that can appear below package working dirs.
 **/.atteler/workspace-vector-index*.json
