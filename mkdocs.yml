@@ -81,6 +81,7 @@ nav:
   - Configuration: configuration.md
   - Providers: providers.md
   - Hooks: hooks.md
+  - Go SDK: sdk.md
   - CLI reference: cli-reference.md
   - Architecture: architecture.md
   - Reference:

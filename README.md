@@ -6,11 +6,12 @@ your repo, on your terms.**
 Atteler is a Go-only LLM harness. It puts a fast Bubble Tea TUI and a large,
 scriptable CLI in front of Anthropic, OpenAI, Codex, Claude Code, and Ollama,
 then layers on the things that make an assistant actually useful inside a
-codebase: durable sessions, agent personas and routing, lifecycle hooks,
-git-worktree isolation, retrieval over your code and history, and auditable
-multi-agent review/speculation runs.
+codebase: a stable Go SDK surface, durable sessions, agent personas and
+routing, lifecycle hooks, git-worktree isolation, retrieval over your code and
+history, and auditable multi-agent review/speculation runs.
 
-No service to host, no SDK to vendor — clone it, point it at a model, and go.
+No service to host and no vendor SDK required to get started — import the Go
+packages, run the binary, point it at a model, and go.
 
 > 📚 **Documentation**: human guide at **<https://tommoulard.github.io/atteler/main/>**
 > with release snapshots under versioned URLs such as
@@ -39,6 +40,9 @@ contents.
   `claude-code`, and `ollama` behind a single `Provider` contract, plus
   OpenAI-compatible endpoints for everything else. The registry constructs each
   on demand and silently skips any you have no credentials for.
+- **SDK-first workflows.** `pkg/sdk` is the stable facade for one-shot chat,
+  provider registry setup, review plans, memory search, plugin execution, and
+  session/worktree orchestration; `docs/sdk.md` defines the API contract.
 - **Evidence-backed routing.** Pick a model by *role* and budget, not by
   hardcoding a name; the router scores candidates against capabilities, cost,
   and latency and records why it chose what it chose.
@@ -345,6 +349,7 @@ versioned URLs when linking to behavior for a specific Atteler release.
 | [Hooks](docs/hooks.md) | Lifecycle events you can subscribe to. |
 | [CLI reference](docs/cli-reference.md) | The complete, generated command surface. |
 | [Architecture](docs/architecture.md) | How the codebase fits together. |
+| [Go SDK](docs/sdk.md) | Stable package surface, examples, and API compatibility policy. |
 | [Symphony](docs/symphony.md) | The issue scheduler and one-shot issue-to-PR publishing. |
 | [Lifecycle events](docs/lifecycle-events.md) | Generated hook payload schemas and examples. |
 
@@ -372,9 +377,12 @@ implementation and tests. Highlights — see
 - Governed plugins and MCP, lifecycle hook privacy with a durable delivery
   ledger, automatic git-worktree isolation, and the Symphony issue-to-PR pipeline
 
-The repository has reusable Go packages, but does not promise a separately
-versioned public SDK contract. Native provider adapters beyond those above
-should be tracked as GitHub Issues until code and tests exist.
+The repository now publishes a deliberate Go SDK contract. Start with
+[`pkg/sdk`](pkg/sdk) for common workflows, use [`docs/sdk.md`](docs/sdk.md) for
+the stable-vs-experimental package table and API compatibility policy, and see
+[`examples/`](examples/) for runnable one-shot chat, provider registry, review,
+memory, plugin, and worktree/session examples. Native provider adapters beyond
+those above should still be tracked as GitHub Issues until code and tests exist.
 
 ## Build, CI, and releases
 

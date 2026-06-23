@@ -68,7 +68,7 @@ details live in [Configuration](configuration.md).
 
 The code-intelligence support uses Go package loading plus a lightweight Python
 scanner in the shared incremental index, with optional managed LSP lookups.
-Atteler does not promise a separately versioned public SDK contract.
+The stable public SDK boundary is documented in [Go SDK](sdk.md); packages outside that table remain experimental even when they live under `pkg/`.
 
 ## Streaming completion contract
 

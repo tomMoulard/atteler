@@ -12,6 +12,7 @@ This file is generated. `llms-full.txt` contains the full flattened documentatio
 - [Configuration](docs/configuration.md): Layered YAML/JSON configuration, generation knobs, and the routing/agent schema.
 - [Providers](docs/providers.md): The built-in LLM providers and how authentication resolves.
 - [Hooks](docs/hooks.md): Lifecycle events you can subscribe to from YAML.
+- [Go SDK surface](docs/sdk.md): Atteler is SDK-first: the CLI and TUI are interfaces over reusable Go packages. Starting with the `v0.1.0` SDK contract, external callers should build against this documented surface instead of importing `cmd/atteler` internals.
 - [CLI reference](docs/cli-reference.md): The complete, generated command surface.
 - [Architecture](docs/architecture.md): An orientation map of how Atteler is put together: a Go-only LLM harness with a thin CLI/TUI shell over reusable, stateless library packages.
 - [Lifecycle hook events](docs/lifecycle-events.md): Lifecycle hook payloads use `schema_version: 1` and are filtered through the selected `payload` policy before local hooks receive them.

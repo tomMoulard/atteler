@@ -15,6 +15,7 @@ instead of direct API quota.
 - **[Configuration](configuration.md)** — the layered YAML config and generation knobs.
 - **[Providers](providers.md)** — the built-in providers and how auth resolves.
 - **[CLI reference](cli-reference.md)** — the full, generated command surface.
+- **[Go SDK](sdk.md)** — the stable package surface, examples, and compatibility policy.
 - **[Hooks](hooks.md)** — lifecycle events you can subscribe to.
 
 ## Versioned documentation

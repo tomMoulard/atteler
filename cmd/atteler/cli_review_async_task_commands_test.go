@@ -1647,7 +1647,7 @@ func TestFormatReviewPlan(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	got := formatReviewPlan(plan)
+	got := review.FormatPlan(plan)
 	for _, want := range []string{
 		"reviewers:\n",
 		"  - alpha\n",
@@ -1668,12 +1668,12 @@ func TestFormatReviewPlan(t *testing.T) {
 func TestReviewPlanDefaults(t *testing.T) {
 	t.Parallel()
 
-	plan, err := review.NewPlan(reviewPlanReviewers(nil), reviewPlanPaths(nil), nil)
+	plan, err := review.NewRunPlan(review.RunPlanOptions{})
 	if err != nil {
 		require.NoError(t, err)
 	}
 
-	got := formatReviewPlan(plan)
+	got := review.FormatPlan(plan)
 	for _, want := range []string{
 		"quality-reviewer\tcategories=correctness,maintainability",
 		"test-engineer\tcategories=tests",

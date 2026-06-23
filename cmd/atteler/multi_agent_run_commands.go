@@ -1329,7 +1329,7 @@ func (r *multiAgentRunRecorder) recordReportLocked(
 		Kind:      kind,
 		Phase:     phase,
 		Agent:     report.Reviewer,
-		Content:   formatReviewReport(report),
+		Content:   review.FormatReport(report),
 		Index:     index,
 		Metadata: map[string]string{
 			"findings": strconv.Itoa(len(report.Findings)),
