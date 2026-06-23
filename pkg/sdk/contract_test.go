@@ -150,11 +150,31 @@ func TestExamplesDirectory_CoversDocumentedSDKWorkflows(t *testing.T) {
 	t.Parallel()
 
 	docs := readRepoFile(t, "docs", "sdk.md")
+	examplesReadme := readRepoFile(t, "examples", "README.md")
+
 	for _, dir := range documentedExampleDirs() {
 		examplePath := filepath.Join(repoRoot(t), "examples", dir, "main.go")
 		require.FileExists(t, examplePath)
 		assert.Contains(t, docs, "examples/"+dir)
+		assert.Contains(t, examplesReadme, "`"+dir+"`")
 	}
+}
+
+func TestExamplesDirectory_HasNoUndocumentedWorkflowDirs(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(filepath.Join(repoRoot(t), "examples"))
+	require.NoError(t, err)
+
+	var actualDirs []string
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			actualDirs = append(actualDirs, entry.Name())
+		}
+	}
+
+	assert.ElementsMatch(t, documentedExampleDirs(), actualDirs)
 }
 
 func TestExamplesDoNotImportCLIInternals(t *testing.T) {
