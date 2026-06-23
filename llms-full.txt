@@ -1388,6 +1388,20 @@ The machine-readable source of the compatibility table is
 `compatibility_policy`, and `packages`. Each package row uses stable snake-case
 fields: `import_path`, `stability`, `since`, and `summary`.
 
+## Release compatibility checklist
+
+Before tagging a release that changes exported SDK code, maintainers should:
+
+1. Run `go test ./pkg/sdk ./pkg/review ./examples/...` so package examples,
+   review workflow contracts, and standalone SDK examples still compile and pass.
+2. Keep `pkg/sdk.APIContract()` synchronized with any package promoted into or
+   removed from the stable surface.
+3. Document any stable-package breaking change in release notes with the
+   deprecation window, migration path, and reason preserving old behavior is
+   unsafe or impractical.
+4. Avoid importing `cmd/atteler` from examples or SDK packages; reusable workflow
+   behavior should move into `pkg/*` APIs first.
+
 ## Stable packages and primary types
 
 | Package | Stable types/functions | Use for |

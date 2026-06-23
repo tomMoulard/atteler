@@ -108,6 +108,8 @@ func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
 
 	assert.Contains(t, docs, "pkg/sdk.APIContract()")
 	assert.Contains(t, docs, "pkg/sdk.CompatibilityPolicy")
+	assert.Contains(t, docs, "Release compatibility checklist")
+	assert.Contains(t, docs, "deprecation window, migration path")
 }
 
 func TestExamplesDirectory_CoversDocumentedSDKWorkflows(t *testing.T) {
