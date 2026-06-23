@@ -1563,11 +1563,41 @@ func TestLoadFiles_AgentToolPolicy(t *testing.T) {
 agents:
   legacy:
     tool_policy: allow-all
+  compatibility:
+    tool_policy: compatibility
 `)
 
 	cfg, _, err := LoadFiles([]string{path})
 	require.NoError(t, err)
 	assert.Equal(t, "allow-all", cfg.Agents["legacy"].ToolPolicy)
+	assert.Equal(t, "compatibility", cfg.Agents["compatibility"].ToolPolicy)
+}
+
+func TestLoadWithDiagnostics_WarnsWhenAgentToolPolicyQuietAllowAlias(t *testing.T) {
+	tempDir := t.TempDir()
+	projectDir := filepath.Join(tempDir, "project")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".atteler"), 0o700))
+
+	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte(`
+agents:
+  reviewer:
+    tool_policy: allow
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex-home"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv(EnvPath, "")
+	t.Chdir(projectDir)
+
+	_, _, _, diagnostics, err := LoadWithDiagnostics()
+	require.NoError(t, err)
+
+	assertDiagnosticContains(t, diagnostics, `agents.reviewer.tool_policy: unsupported agent tool_policy "allow"`)
 }
 
 func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {

@@ -47,7 +47,7 @@ func TestRegistry_UpsertNormalizesToolPolicyAndPermissions(t *testing.T) {
 
 	registry.Upsert(Agent{
 		Name:            " runner ",
-		ToolPolicy:      "compat",
+		ToolPolicy:      "compatibility",
 		ToolPermissions: map[string]bool{" BASH ": false, " READ ": true},
 	})
 
@@ -58,6 +58,21 @@ func TestRegistry_UpsertNormalizesToolPolicyAndPermissions(t *testing.T) {
 	assert.True(t, runner.HasToolPermission("read"))
 	assert.False(t, runner.HasToolPermission("bash"))
 	assert.NotContains(t, runner.ToolPermissions, " BASH ")
+}
+
+func TestAgent_HasToolPermission_QuietAllowAliasesDoNotEnableCompatibilityMode(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []string{"allow", "all", "compat"} {
+		t.Run(policy, func(t *testing.T) {
+			t.Parallel()
+
+			a := Agent{Name: "not-legacy", ToolPolicy: policy}
+
+			assert.False(t, a.HasToolPermission("future-default-tool"))
+			assert.Equal(t, ToolPolicyDeny, a.ToolPolicySummary())
+		})
+	}
 }
 
 func TestRegistry_UpsertNilReceiver(t *testing.T) {

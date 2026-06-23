@@ -1071,7 +1071,7 @@ func toolPolicyMigrationDiagnostics(cfg Config) []Diagnostic {
 
 func isSupportedAgentToolPolicy(policy string) bool {
 	switch normalizeAgentToolPolicy(policy) {
-	case "", "deny", "deny-all", stateReasoningLevelDefault, "allow-all", "allow", "all", "compat", "compatibility", "legacy":
+	case "", "deny", "deny-all", stateReasoningLevelDefault, "allow-all", "compatibility", "legacy":
 		return true
 	default:
 		return false
