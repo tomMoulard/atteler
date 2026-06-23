@@ -28,6 +28,7 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 	policy := string(policyBytes)
 
 	for _, privatePath := range []string{
+		"/.atteler-state*",
 		"/.atteler/*",
 		"/.atteler/fixtures/*",
 		"/.atteler/evals/*",
@@ -57,6 +58,7 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 		".atteler/tasks.json",
 		".atteler/config.{yaml,yml,json}",
 		".atteler/events.jsonl",
+		".atteler-state*",
 		".atteler/eval-report*.json",
 		".atteler/codeintel-index.json",
 		".atteler/agent-memory.json",
@@ -96,6 +98,8 @@ func TestAttelerArtifactPolicy_GitIgnoreResolution(t *testing.T) {
 		".atteler/config.yml",
 		".atteler/config.json",
 		".atteler/events.jsonl",
+		".atteler-state.yaml",
+		".atteler-state-123.tmp",
 		".atteler/sessions/session.json",
 		".atteler/runs/research/run.json",
 		".atteler/research/plugin-sandboxing/tasks.generated.yaml",

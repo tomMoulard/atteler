@@ -183,7 +183,8 @@ checklist live in [`.atteler/README.md`](.atteler/README.md).
 - Ignored transient/private defaults include `.atteler/sessions/`,
   `.atteler/runs/`, `.atteler/research/`, `.atteler/worktrees/`,
   `.atteler/tasks.json`, `.atteler/config.{yaml,yml,json}`,
-  `.atteler/events.jsonl`, `.atteler/eval-report*.json`,
+  `.atteler/events.jsonl`, adjacent `.atteler-state*` temp/state files,
+  `.atteler/eval-report*.json`,
   `.atteler/codeintel-index.json`, `.atteler/*-vector-index*.json`,
   `.atteler/agent-memory.json`, `.atteler/skill-learning/`, raw recorded
   responses such as `.atteler/fixtures/once.json`, local MCP manifests such as
