@@ -120,6 +120,7 @@ func TestRunOnceDryRunDoesNotCreateArtifactsOrState(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
+	createCalled := false
 	tracker := fakeTracker{issues: []symphony.Issue{{
 		ID:         "node-1",
 		Identifier: "GH-1",
@@ -133,14 +134,19 @@ func TestRunOnceDryRunDoesNotCreateArtifactsOrState(t *testing.T) {
 		Repository: "owner/repo",
 		Labels:     []string{"atteler-agent"},
 		Tracker:    tracker,
-		DryRun:     true,
-		Now:        fixedIssueWatchNow,
+		CreateWorktree: func(context.Context, string, string) (*worktree.Info, error) {
+			createCalled = true
+			return &worktree.Info{}, nil
+		},
+		DryRun: true,
+		Now:    fixedIssueWatchNow,
 	})
 	require.NoError(t, err)
 
 	require.Len(t, result.Candidates, 1)
 	assert.True(t, result.DryRun)
 	assert.Empty(t, result.Runs)
+	assert.False(t, createCalled)
 	assert.NoFileExists(t, filepath.Join(root, defaultStatePath))
 	assert.NoDirExists(t, filepath.Join(root, defaultRunsRoot))
 }
