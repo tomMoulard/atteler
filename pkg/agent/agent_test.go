@@ -40,6 +40,26 @@ func TestRegistry_UpsertOverridesExisting(t *testing.T) {
 	assert.Equal(t, []string{"explorer", "writer"}, registry.List())
 }
 
+func TestRegistry_UpsertNormalizesToolPolicyAndPermissions(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(nil)
+
+	registry.Upsert(Agent{
+		Name:            " runner ",
+		ToolPolicy:      "compat",
+		ToolPermissions: map[string]bool{" BASH ": false, " READ ": true},
+	})
+
+	runner, ok := registry.Get("runner")
+	require.True(t, ok)
+
+	assert.Equal(t, ToolPolicyAllowAll, runner.ToolPolicy)
+	assert.True(t, runner.HasToolPermission("read"))
+	assert.False(t, runner.HasToolPermission("bash"))
+	assert.NotContains(t, runner.ToolPermissions, " BASH ")
+}
+
 func TestRegistry_UpsertNilReceiver(t *testing.T) {
 	t.Parallel()
 

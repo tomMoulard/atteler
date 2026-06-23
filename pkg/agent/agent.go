@@ -440,6 +440,9 @@ func (r *Registry) Upsert(a Agent) {
 		return
 	}
 
+	a.ToolPermissions = cloneToolPermissions(a.ToolPermissions)
+	a.ToolPolicy = normalizeToolPolicy(a.ToolPolicy)
+
 	if r.agents == nil {
 		r.agents = make(map[string]Agent, 1)
 	}
