@@ -359,6 +359,9 @@ func TestFormatAgentDescription(t *testing.T) {
 		"triggers:",
 		"temperature: 0.1",
 		"seed: 99",
+		"tool_policy: deny",
+		"effective_permissions: []",
+		"effective_tools: []",
 		"reasoning_level: high",
 		"max_tokens: 100",
 	} {
@@ -366,6 +369,24 @@ func TestFormatAgentDescription(t *testing.T) {
 			require.Failf(t, "unexpected failure", "agent description missing %q in:\n%s", want, out)
 		}
 	}
+}
+
+func TestPrintDoctorAgentPermissions(t *testing.T) {
+	t.Parallel()
+
+	registry := agent.NewRegistry(map[string]appconfig.AgentConfig{
+		"reviewer": {ToolPermissions: map[string]bool{"read": true}},
+		"default":  {},
+	})
+
+	var out strings.Builder
+	printDoctorAgentPermissions(&out, registry, []string{"default", "reviewer"})
+
+	got := out.String()
+	assert.Contains(t, got, "agent_effective_permissions:")
+	assert.Contains(t, got, "default: policy=deny permissions=none tools=none")
+	assert.Contains(t, got, "reviewer: policy=deny permissions=read tools=glob,grep,read")
+	assert.NotContains(t, got, "bash")
 }
 
 func TestFormatTokenUsageSummary(t *testing.T) {

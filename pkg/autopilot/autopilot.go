@@ -149,8 +149,9 @@ Operate like a careful autonomous researcher:
 // cluttering the default `--list-agents` output.
 var workerAgents = []agent.Agent{
 	{
-		Name:        "explorer",
-		Description: "Read-only investigator: locates and summarizes code, does not modify it.",
+		Name:            "explorer",
+		Description:     "Read-only investigator: locates and summarizes code, does not modify it.",
+		ToolPermissions: map[string]bool{"read": true, "search": true, "shell.readonly": true},
 		SystemPrompt: `You are an exploration worker. Investigate the codebase and report what you
 find: relevant files, entry points, data flow, and conventions. Use read-only
 commands (grep, find, cat, sed -n). Do NOT modify files. End with a concise,
@@ -158,8 +159,9 @@ structured summary that another agent can act on.`,
 		Hidden: true,
 	},
 	{
-		Name:        "planner",
-		Description: "Designs a concrete implementation plan from provided context.",
+		Name:            "planner",
+		Description:     "Designs a concrete implementation plan from provided context.",
+		ToolPermissions: map[string]bool{"read": true, "search": true},
 		SystemPrompt: `You are a planning worker. Given a task and exploration findings, produce a
 concrete, step-by-step implementation plan: which files to change, the approach,
 edge cases, and how to verify. Do NOT implement — output the plan only.`,
@@ -168,6 +170,12 @@ edge cases, and how to verify. Do NOT implement — output the plan only.`,
 	{
 		Name:        "implementer",
 		Description: "Implements a change following a given plan.",
+		ToolPermissions: map[string]bool{
+			"read":             true,
+			"search":           true,
+			"filesystem.write": true,
+			"shell.write":      true,
+		},
 		SystemPrompt: `You are an implementation worker. Implement the change described by the plan you
 are given. Make focused edits that match the surrounding code's conventions, then
 report exactly what you changed and how you verified it (tests, build). Stay
@@ -175,8 +183,9 @@ within the scope of the plan.`,
 		Hidden: true,
 	},
 	{
-		Name:        "reviewer",
-		Description: "Reviews candidate implementations or hunts root causes; read-only.",
+		Name:            "reviewer",
+		Description:     "Reviews candidate implementations or hunts root causes; read-only.",
+		ToolPermissions: map[string]bool{"read": true, "search": true, "shell.readonly": true},
 		SystemPrompt: `You are a review worker. Critically evaluate the candidate implementation(s) or
 evidence you are given for correctness, simplicity, and adherence to the plan.
 When comparing candidates, pick the best (or describe how to merge them) and
@@ -239,9 +248,10 @@ func WorkerAgentNames() []string {
 // rendered self-fork manual as its system prompt.
 func OrchestratorAgent(systemPrompt string) agent.Agent {
 	return agent.Agent{
-		Name:         OrchestratorAgentName,
-		Description:  "Auto-mode orchestrator that forks atteler into worker sub-agents.",
-		SystemPrompt: systemPrompt,
+		Name:            OrchestratorAgentName,
+		Description:     "Auto-mode orchestrator that forks atteler into worker sub-agents.",
+		SystemPrompt:    systemPrompt,
+		ToolPermissions: map[string]bool{"read": true, "search": true, "shell.write": true},
 	}
 }
 

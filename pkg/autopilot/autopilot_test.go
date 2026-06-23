@@ -116,10 +116,12 @@ func TestWorkerAgents_HaveBashAccessAndPrompts(t *testing.T) {
 
 	for _, w := range workers {
 		assert.NotEmpty(t, w.SystemPrompt, "worker %q should carry a system prompt", w.Name)
-		// nil ToolPermissions means all tools (including bash) pass through.
-		assert.Nil(t, w.ToolPermissions, "worker %q should not restrict tools", w.Name)
-		assert.True(t, w.HasToolPermission("bash"))
+		assert.NotNil(t, w.ToolPermissions, "worker %q should declare explicit tool capabilities", w.Name)
 	}
+
+	explorer := workers[0]
+	assert.True(t, explorer.HasToolPermission("bash"))
+	assert.False(t, explorer.HasToolPermission("write"))
 }
 
 func TestOrchestratorAgent_CarriesPrompt(t *testing.T) {
@@ -128,6 +130,6 @@ func TestOrchestratorAgent_CarriesPrompt(t *testing.T) {
 	a := autopilot.OrchestratorAgent("MANUAL-BODY")
 	assert.Equal(t, autopilot.OrchestratorAgentName, a.Name)
 	assert.Equal(t, "MANUAL-BODY", a.SystemPrompt)
-	assert.Nil(t, a.ToolPermissions)
+	assert.NotNil(t, a.ToolPermissions)
 	assert.True(t, a.HasToolPermission("bash"))
 }

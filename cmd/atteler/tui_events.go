@@ -329,16 +329,14 @@ func emitFileWriteWarning(
 	})
 }
 
-func emitAgentExecute(ctx context.Context, runner *events.Runner, sessionID, sessionPath, agentName, modelName string) tea.Cmd {
+func emitAgentExecute(ctx context.Context, runner *events.Runner, sessionID, sessionPath, agentName, modelName string, metadata map[string]string) tea.Cmd {
 	return emitHook(ctx, runner, events.Event{
 		Type:        events.AgentExecute,
 		SessionID:   sessionID,
 		SessionPath: sessionPath,
 		Agent:       agentName,
 		Model:       modelName,
-		Metadata: map[string]string{
-			"agent": agentName,
-		},
+		Metadata:    metadata,
 	})
 }
 

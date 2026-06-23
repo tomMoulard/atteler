@@ -571,6 +571,8 @@ func runOnceWithOptions(
 		prepared.fallbackModels,
 		executionOptions.AgentLoopBudget,
 		executionOptions.Autonomy,
+		prepared.activeAgent.agent,
+		prepared.activeAgent.ok,
 		executionOptions.AgentLoopCheckpointInterval,
 		executionOptions.Response,
 		executionOptions.PermissionPolicy,
@@ -1052,9 +1054,7 @@ func saveRunOnceUserMessage(
 			SessionPath: store.Path(sessionState.ID),
 			Agent:       prepared.activeAgent.name,
 			Model:       sessionState.DefaultModel,
-			Metadata: map[string]string{
-				"agent": prepared.activeAgent.name,
-			},
+			Metadata:    agentExecuteMetadataForAgent(prepared.activeAgent.agent, prepared.activeAgent.ok, prepared.activeAgent.name),
 		})
 	}
 
@@ -1906,6 +1906,8 @@ func runOnceComplete(
 		fallbackModels,
 		agentLoopBudget,
 		autonomy.DefaultLevel,
+		agent.Agent{},
+		false,
 		agentLoopCheckpointInterval,
 		responseOptions,
 		permissionPolicy,
@@ -1923,6 +1925,8 @@ func runOnceCompleteWithAutonomy(
 	fallbackModels []string,
 	agentLoopBudget llm.AgentLoopBudget,
 	autonomyLevel autonomy.Level,
+	activeAgent agent.Agent,
+	hasAgent bool,
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
 	permissionPolicy *permission.Policy,
@@ -1938,6 +1942,8 @@ func runOnceCompleteWithAutonomy(
 		fallbackModels,
 		agentLoopBudget,
 		autonomyLevel,
+		activeAgent,
+		hasAgent,
 		agentLoopCheckpointInterval,
 		responseOptions,
 		permissionPolicy,
@@ -1957,6 +1963,8 @@ func runOnceCompleteWithAutonomyTranscript(
 	fallbackModels []string,
 	agentLoopBudget llm.AgentLoopBudget,
 	autonomyLevel autonomy.Level,
+	activeAgent agent.Agent,
+	hasAgent bool,
 	agentLoopCheckpointInterval int,
 	responseOptions responseRecordOptions,
 	permissionPolicy *permission.Policy,
@@ -2009,7 +2017,7 @@ func runOnceCompleteWithAutonomyTranscript(
 		Autonomy:           autonomyLevel,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: agentLoopCheckpointInterval,
-		Policy:             llm.DefaultToolPolicyForAutonomy(autonomyLevel),
+		Policy:             toolPolicyForAgent(llm.DefaultToolPolicyForAutonomy(autonomyLevel), activeAgent, hasAgent),
 		CheckpointSink:     agentLoopCheckpointSink(checkpointPath),
 	})
 	if err != nil {

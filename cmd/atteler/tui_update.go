@@ -1007,7 +1007,15 @@ func (m model) submitPromptRequestCommand(
 	}
 
 	if activeAgent.ok {
-		cmds = append(cmds, emitAgentExecute(m.ctx, m.hookRunner, m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel))
+		cmds = append(cmds, emitAgentExecute(
+			m.ctx,
+			m.hookRunner,
+			m.sessionState.ID,
+			m.sessionPath,
+			activeAgent.name,
+			requestModel,
+			agentExecuteMetadataForAgent(activeAgent.agent, activeAgent.ok, activeAgent.name),
+		))
 	}
 
 	if event, ok := routeDecisionEvent(m.sessionState.ID, m.sessionPath, activeAgent.name, requestModel, routeDecision); ok {

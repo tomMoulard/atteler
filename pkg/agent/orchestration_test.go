@@ -66,8 +66,8 @@ func TestRegistry_PlanOrchestration_OverlappingTriggersPreferSpecificIntent(t *t
 	t.Parallel()
 
 	registry := NewRegistry(map[string]config.AgentConfig{
-		"aaa-general": {Triggers: []string{"go"}},
-		"zzz-tester":  {Triggers: []string{"go test"}},
+		"aaa-general": {Triggers: []string{"go"}, ToolPermissions: map[string]bool{"shell.readonly": true}},
+		"zzz-tester":  {Triggers: []string{"go test"}, ToolPermissions: map[string]bool{"shell.readonly": true}},
 	})
 
 	plan, err := registry.PlanOrchestration(OrchestrationRequest{
@@ -87,8 +87,8 @@ func TestRegistry_PlanOrchestration_OverlappingCapabilitiesPreferSpecificIntent(
 	t.Parallel()
 
 	registry := NewRegistry(map[string]config.AgentConfig{
-		"aaa-general":    {Capabilities: []string{"test"}},
-		"zzz-specialist": {Capabilities: []string{"integration test"}},
+		"aaa-general":    {Capabilities: []string{"test"}, ToolPermissions: map[string]bool{"shell.readonly": true}},
+		"zzz-specialist": {Capabilities: []string{"integration test"}, ToolPermissions: map[string]bool{"shell.readonly": true}},
 	})
 
 	plan, err := registry.PlanOrchestration(OrchestrationRequest{
@@ -109,10 +109,12 @@ func TestRegistry_PlanOrchestration_SpecificCapabilityCanBeatGenericTrigger(t *t
 
 	registry := NewRegistry(map[string]config.AgentConfig{
 		"aaa-general": {
-			Triggers: []string{"test"},
+			Triggers:        []string{"test"},
+			ToolPermissions: map[string]bool{"shell.readonly": true},
 		},
 		"zzz-specialist": {
-			Capabilities: []string{"integration test"},
+			Capabilities:    []string{"integration test"},
+			ToolPermissions: map[string]bool{"shell.readonly": true},
 		},
 	})
 
@@ -804,7 +806,10 @@ func TestRegistry_PlanOrchestration_WriteDocsDoesNotRequestResearchRole(t *testi
 
 	registry := NewRegistry(map[string]config.AgentConfig{
 		"researcher": {Capabilities: []string{"research"}},
-		"writer":     {Capabilities: []string{"write docs"}},
+		"writer": {
+			Capabilities:    []string{"write docs"},
+			ToolPermissions: map[string]bool{"filesystem.write": true},
+		},
 	})
 
 	plan, err := registry.PlanOrchestration(OrchestrationRequest{Prompt: "write docs"})
@@ -819,7 +824,7 @@ func TestRegistry_PlanOrchestration_WriteCodeDoesNotRequestDocumentationRole(t *
 	t.Parallel()
 
 	registry := NewRegistry(map[string]config.AgentConfig{
-		"executor": {Description: "Implementation specialist for coding"},
+		"executor": {Description: "Implementation specialist for coding", ToolPermissions: map[string]bool{"filesystem.write": true}},
 		"writer":   {Description: "Documentation specialist"},
 	})
 
@@ -835,7 +840,7 @@ func TestRegistry_PlanOrchestration_WriteTestsDoesNotRequestDocumentationRole(t 
 	t.Parallel()
 
 	registry := NewRegistry(map[string]config.AgentConfig{
-		"tester": {Description: "Testing specialist"},
+		"tester": {Description: "Testing specialist", ToolPermissions: map[string]bool{"filesystem.write": true}},
 		"writer": {Description: "Documentation specialist"},
 	})
 
@@ -873,9 +878,9 @@ func TestRegistry_PlanOrchestration_MultiRolePlanRecordsComposition(t *testing.T
 	t.Parallel()
 
 	registry := NewRegistry(map[string]config.AgentConfig{
-		"executor": {Capabilities: []string{"implement"}},
-		"reviewer": {Capabilities: []string{"review"}},
-		"tester":   {Capabilities: []string{"test"}},
+		"executor": {Capabilities: []string{"implement"}, ToolPermissions: map[string]bool{"read": true, "filesystem.write": true, "shell.readonly": true}},
+		"reviewer": {Capabilities: []string{"review"}, ToolPermissions: map[string]bool{"read": true, "filesystem.write": true, "shell.readonly": true}},
+		"tester":   {Capabilities: []string{"test"}, ToolPermissions: map[string]bool{"read": true, "filesystem.write": true, "shell.readonly": true}},
 	})
 
 	plan, err := registry.PlanOrchestration(OrchestrationRequest{

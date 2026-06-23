@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,6 +115,7 @@ type AgentConfig struct {
 	Seed        *int     `json:"seed,omitempty" yaml:"seed,omitempty"`
 
 	ToolPermissions map[string]bool `json:"tools,omitempty" yaml:"tools,omitempty"`
+	ToolPolicy      string          `json:"tool_policy,omitempty" yaml:"tool_policy,omitempty"`
 
 	RoutingPolicy    RoutingPolicyConfig `json:"routing_policy,omitzero" yaml:"routing_policy,omitempty"`
 	Model            string              `json:"model,omitempty" yaml:"model,omitempty"`
@@ -644,6 +646,7 @@ type fileAgentConfig struct {
 	Temperature      *float64             `json:"temperature" yaml:"temperature"`
 	SystemPrompt     *string              `json:"system_prompt" yaml:"system_prompt"`
 	ToolPermissions  map[string]bool      `json:"tools" yaml:"tools"`
+	ToolPolicy       *string              `json:"tool_policy" yaml:"tool_policy"`
 	MaxTokens        *int                 `json:"max_tokens" yaml:"max_tokens"`
 	Hidden           *bool                `json:"hidden" yaml:"hidden"`
 	FallbackModels   []string             `json:"fallback_models" yaml:"fallback_models"`
@@ -812,6 +815,7 @@ func LoadWithDiagnostics() (Config, []string, OriginMap, []Diagnostic, error) {
 	loaded = append(loaded, fileLoaded...)
 
 	normalizeEmptyMaps(&cfg)
+	diagnostics = append(diagnostics, toolPolicyMigrationDiagnostics(cfg)...)
 
 	return cfg, loaded, origins, diagnostics, err
 }
@@ -1025,6 +1029,60 @@ func configPaths(configHome string) []string {
 		filepath.Join(dir, "config.yml"),
 		filepath.Join(dir, "config.json"),
 	}
+}
+
+func toolPolicyMigrationDiagnostics(cfg Config) []Diagnostic {
+	if len(cfg.Agents) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	diagnostics := make([]Diagnostic, 0)
+
+	for _, name := range names {
+		agent := cfg.Agents[name]
+		if policy := strings.TrimSpace(agent.ToolPolicy); policy != "" && !isSupportedAgentToolPolicy(policy) {
+			diagnostics = append(diagnostics, Diagnostic{
+				Severity: DiagnosticWarning,
+				Field:    agentFieldPath(name, "tool_policy"),
+				Message:  fmt.Sprintf("unsupported agent tool_policy %q; effective policy is deny (supported: deny, allow-all)", policy),
+			})
+		}
+
+		if agent.ToolPermissions != nil || strings.TrimSpace(agent.ToolPolicy) != "" {
+			continue
+		}
+
+		diagnostics = append(diagnostics, Diagnostic{
+			Severity: DiagnosticWarning,
+			Field:    agentFieldPath(name, "tools"),
+			Message:  "agent has no tool policy; omitted tools now deny every tool by default. Add explicit capability grants under tools or set tool_policy: allow-all for legacy compatibility.",
+		})
+	}
+
+	return diagnostics
+}
+
+func isSupportedAgentToolPolicy(policy string) bool {
+	switch normalizeAgentToolPolicy(policy) {
+	case "", "deny", "deny-all", stateReasoningLevelDefault, "allow-all":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAgentToolPolicy(policy string) string {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	policy = strings.ReplaceAll(policy, "_", "-")
+
+	return policy
 }
 
 func normalizeEmptyMaps(cfg *Config) {
@@ -1414,6 +1472,11 @@ func mergeFileAgent(current *AgentConfig, agent fileAgentConfig, rec *originReco
 		current.ToolPermissions = make(map[string]bool, len(agent.ToolPermissions))
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
 		rec.replace(agentFieldPath(name, "tools"), source, current.ToolPermissions, "replaces the entire tool permissions map")
+	}
+
+	if agent.ToolPolicy != nil {
+		current.ToolPolicy = strings.TrimSpace(*agent.ToolPolicy)
+		rec.set(agentFieldPath(name, "tool_policy"), source, current.ToolPolicy)
 	}
 
 	if agent.RoutingPolicy != nil {
@@ -2280,6 +2343,11 @@ func mergeConfigAgent(current *AgentConfig, agent AgentConfig, rec *originRecord
 		rec.replace(agentFieldPath(name, "tools"), source, current.ToolPermissions, "replaces the entire tool permissions map")
 	}
 
+	if agent.ToolPolicy != "" {
+		current.ToolPolicy = strings.TrimSpace(agent.ToolPolicy)
+		rec.set(agentFieldPath(name, "tool_policy"), source, current.ToolPolicy)
+	}
+
 	if routingPolicyConfigured(agent.RoutingPolicy) {
 		current.RoutingPolicy = cloneRoutingPolicy(agent.RoutingPolicy)
 		rec.replace(agentFieldPath(name, "routing_policy"), source, current.RoutingPolicy, "replaces the entire routing policy")
@@ -3088,6 +3156,12 @@ func mergeConfigAgentFromOrigins(current *AgentConfig, agent AgentConfig, dstOri
 		maps.Copy(current.ToolPermissions, agent.ToolPermissions)
 
 		appendOriginChain(dstOrigins, agentFieldPath(name, "tools"), srcOrigins, true)
+	}
+
+	if agent.ToolPolicy != "" {
+		current.ToolPolicy = strings.TrimSpace(agent.ToolPolicy)
+
+		appendOriginChain(dstOrigins, agentFieldPath(name, "tool_policy"), srcOrigins, false)
 	}
 
 	if routingPolicyConfigured(agent.RoutingPolicy) {

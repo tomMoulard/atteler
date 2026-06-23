@@ -11,6 +11,7 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/agent"
 	"github.com/tommoulard/atteler/pkg/autonomy"
+	"github.com/tommoulard/atteler/pkg/llm"
 	"github.com/tommoulard/atteler/pkg/promptcomplete"
 	"github.com/tommoulard/atteler/pkg/session"
 	"github.com/tommoulard/atteler/pkg/shell"
@@ -464,35 +465,53 @@ func promptPermissionCandidates(registry *agent.Registry, selectedAgent string) 
 		return out
 	}
 
-	permissions := activeAgent.ToolPermissions
-	if permissions == nil {
-		out = append(out, promptcomplete.Candidate{
-			Text:        "bash",
-			Kind:        "permission",
-			Source:      "agent permissions",
-			Description: selectedAgent + " uses the default tool policy; bash is available with safety checks",
-			Tokens:      []string{"tool", "allowed", selectedAgent},
-		})
+	seen := make(map[string]bool)
+	toolPolicy := activeAgent.ToolPolicySummary()
+	out = append(out, promptcomplete.Candidate{
+		Text:        "tool-policy:" + toolPolicy,
+		Kind:        "permission",
+		Source:      "agent tool policy",
+		Description: selectedAgent + " effective tool policy is " + toolPolicy,
+		Tokens:      []string{"tool-policy", "permission", selectedAgent},
+	})
 
-		return out
-	}
-
-	names := make([]string, 0, len(permissions))
-	for name, allowed := range permissions {
-		if allowed {
-			names = append(names, name)
+	for _, name := range activeAgent.EffectivePermissionNames() {
+		if seen[name] {
+			continue
 		}
-	}
 
-	sort.Strings(names)
-
-	for _, name := range names {
+		seen[name] = true
 		out = append(out, promptcomplete.Candidate{
 			Text:        name,
 			Kind:        "permission",
-			Source:      "agent permissions",
-			Description: selectedAgent + " is allowed to use tool " + name,
+			Source:      "agent effective permissions",
+			Description: selectedAgent + " is effectively granted permission " + name,
+			Tokens:      []string{"permission", "allowed", selectedAgent},
+		})
+	}
+
+	for _, name := range activeAgent.EffectiveToolNames(llm.DefaultTools()) {
+		if seen[name] {
+			continue
+		}
+
+		seen[name] = true
+		out = append(out, promptcomplete.Candidate{
+			Text:        name,
+			Kind:        "permission",
+			Source:      "agent effective tools",
+			Description: selectedAgent + " is effectively allowed to use tool " + name,
 			Tokens:      []string{"tool", "allowed", selectedAgent},
+		})
+	}
+
+	if len(seen) == 0 {
+		out = append(out, promptcomplete.Candidate{
+			Text:        "tools:none",
+			Kind:        "permission",
+			Source:      "agent effective tools",
+			Description: selectedAgent + " is effectively allowed to use no tools",
+			Tokens:      []string{"tool", "denied", selectedAgent},
 		})
 	}
 

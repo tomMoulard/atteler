@@ -47,7 +47,10 @@ type eventSchema struct {
 var eventSchemas = map[string]eventSchema{
 	AgentExecute: lifecycleEventSchema(eventSchema{
 		Metadata: map[string]metadataPolicy{
-			"agent": metadataSafe,
+			"agent":                 metadataSafe,
+			"tool_policy":           metadataSafe,
+			"effective_permissions": metadataSafe,
+			"effective_tools":       metadataSafe,
 		},
 	}),
 	AssistantMessage: lifecycleEventSchema(eventSchema{

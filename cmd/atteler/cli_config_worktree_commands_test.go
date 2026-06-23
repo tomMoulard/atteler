@@ -187,6 +187,40 @@ trusted_project_roots = ["/repo"]
 	assert.Equal(t, "codex", report.Diagnostics[0].Importer)
 }
 
+func TestDoctorOfflineJSONReportsAgentPermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	setDoctorOfflineTestEnv(t, tempDir)
+
+	configPath := filepath.Join(tempDir, "agents.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+agents:
+  reviewer:
+    tools:
+      read: true
+      search: true
+`), 0o600))
+	t.Setenv(appconfig.EnvPath, configPath)
+
+	var err error
+
+	stdout := captureStdoutForStateDiagnostics(t, func() {
+		err = doctorOffline(t.Context(), cliOptions{
+			sessionDir:   filepath.Join(tempDir, "sessions"),
+			outputFormat: outputFormatJSON,
+		})
+	})
+
+	require.NoError(t, err)
+
+	var report doctorOfflineJSONReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	require.Len(t, report.AgentPermissions, 1)
+	assert.Equal(t, "reviewer", report.AgentPermissions[0].Name)
+	assert.Equal(t, "deny", report.AgentPermissions[0].ToolPolicy)
+	assert.Equal(t, []string{"read", "search"}, report.AgentPermissions[0].EffectivePermissions)
+	assert.Equal(t, []string{"glob", "grep", "read"}, report.AgentPermissions[0].EffectiveTools)
+}
+
 func TestDoctorOfflineJSONReportsFatalConfigStatus(t *testing.T) {
 	tempDir := t.TempDir()
 	setDoctorOfflineTestEnv(t, tempDir)
