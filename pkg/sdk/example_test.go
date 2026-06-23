@@ -184,6 +184,40 @@ func ExampleNewSession() {
 	// fake-model 1 true
 }
 
+func ExampleSaveSession() {
+	root, err := os.MkdirTemp("", "atteler-sdk-session-*")
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() {
+		if cleanupErr := os.RemoveAll(root); cleanupErr != nil {
+			panic(cleanupErr)
+		}
+	}()
+
+	store := session.NewStore(root)
+	sessionState := sdk.NewSession(sdk.SessionOptions{
+		Model: "fake-model",
+		Title: "saved session",
+		Tags:  []string{"sdk"},
+	})
+
+	if saveErr := sdk.SaveSession(store, sessionState); saveErr != nil {
+		panic(saveErr)
+	}
+
+	saved, err := store.Load(sessionState.ID)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(saved.Title, len(saved.Tags), saved.DefaultModel)
+
+	// Output:
+	// saved session 1 fake-model
+}
+
 func ExampleAttachWorktree() {
 	sessionState := sdk.NewSession(sdk.SessionOptions{Model: "fake-model"})
 	sdk.AttachWorktree(&sessionState, &worktree.Info{
