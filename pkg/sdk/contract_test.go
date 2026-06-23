@@ -48,6 +48,26 @@ func TestPackageContracts_AreDocumentedAndWellFormed(t *testing.T) {
 	}
 }
 
+func TestPackageContracts_DocsKeepStabilitySectionsAligned(t *testing.T) {
+	t.Parallel()
+
+	docs := readRepoFile(t, "docs", "sdk.md")
+	stableSection := sectionBetween(t, docs, "## Stable packages and primary types", "## Experimental packages")
+	experimentalSection := sectionBetween(t, docs, "## Experimental packages", "## Runnable examples")
+
+	for _, contract := range sdk.PackageContracts() {
+		shortPath := shortPackagePath(contract.ImportPath)
+		switch contract.Stability {
+		case sdk.StabilityStable:
+			assert.Contains(t, stableSection, "`"+shortPath+"`")
+			assert.NotContains(t, experimentalSection, "`"+shortPath+"`")
+		case sdk.StabilityExperimental:
+			assert.Contains(t, experimentalSection, "`"+shortPath+"`")
+			assert.NotContains(t, stableSection, "`"+shortPath+"`")
+		}
+	}
+}
+
 func TestPackageContracts_CoverEveryTopLevelPackage(t *testing.T) {
 	t.Parallel()
 
@@ -163,6 +183,19 @@ func shortPackagePath(importPath string) string {
 	const prefix = "github.com/tommoulard/atteler/"
 
 	return strings.TrimPrefix(importPath, prefix)
+}
+
+func sectionBetween(t *testing.T, source, start, end string) string {
+	t.Helper()
+
+	startIndex := strings.Index(source, start)
+	require.NotEqual(t, -1, startIndex, "section start %q not found", start)
+
+	section := source[startIndex+len(start):]
+	endIndex := strings.Index(section, end)
+	require.NotEqual(t, -1, endIndex, "section end %q not found", end)
+
+	return section[:endIndex]
 }
 
 func readRepoFile(t *testing.T, parts ...string) string {
