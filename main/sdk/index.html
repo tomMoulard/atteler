@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://tommoulard.github.io/atteler/main/getting-started/">
+        <link rel="canonical" href="https://tommoulard.github.io/atteler/main/sdk/">
       
       
-        <link rel="prev" href="..">
+        <link rel="prev" href="../hooks/">
       
       
-        <link rel="next" href="../common-workflows/">
+        <link rel="next" href="../cli-reference/">
       
       
       <link rel="icon" href="../assets/images/favicon.png">
@@ -24,7 +24,7 @@
     
     
       
-        <title>Getting started - Atteler</title>
+        <title>Go SDK - Atteler</title>
       
     
     
@@ -78,7 +78,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#getting-started" class="md-skip">
+        <a href="#go-sdk-surface" class="md-skip">
           Skip to content
         </a>
       
@@ -118,7 +118,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Getting started
+              Go SDK
             
           </span>
         </div>
@@ -257,11 +257,9 @@
   
   
   
-    
   
-  
-    <li class="md-tabs__item md-tabs__item--active">
-      <a href="./" class="md-tabs__link">
+    <li class="md-tabs__item">
+      <a href="../getting-started/" class="md-tabs__link">
         
   
   
@@ -354,9 +352,11 @@
   
   
   
+    
   
-    <li class="md-tabs__item">
-      <a href="../sdk/" class="md-tabs__link">
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
         
   
   
@@ -504,32 +504,10 @@
       
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    Getting started
-    
-  </span>
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
         
   
   
@@ -540,89 +518,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#run-from-a-clone" class="md-nav__link">
-    <span class="md-ellipsis">
-      Run from a clone
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#install-or-build-a-binary" class="md-nav__link">
-    <span class="md-ellipsis">
-      Install or build a binary
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#one-shot-prompts-no-tui" class="md-nav__link">
-    <span class="md-ellipsis">
-      One-shot prompts (no TUI)
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#the-command-surface" class="md-nav__link">
-    <span class="md-ellipsis">
-      The command surface
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#offline-inspection" class="md-nav__link">
-    <span class="md-ellipsis">
-      Offline inspection
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#local-verification" class="md-nav__link">
-    <span class="md-ellipsis">
-      Local verification
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#next-steps" class="md-nav__link">
-    <span class="md-ellipsis">
-      Next steps
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -719,10 +614,32 @@
       
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../sdk/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    Go SDK
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -733,6 +650,89 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      Install
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#compatibility-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      Compatibility policy
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#release-compatibility-checklist" class="md-nav__link">
+    <span class="md-ellipsis">
+      Release compatibility checklist
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stable-packages-and-primary-types" class="md-nav__link">
+    <span class="md-ellipsis">
+      Stable packages and primary types
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#experimental-packages" class="md-nav__link">
+    <span class="md-ellipsis">
+      Experimental packages
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runnable-examples" class="md-nav__link">
+    <span class="md-ellipsis">
+      Runnable examples
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#minimal-one-shot-chat" class="md-nav__link">
+    <span class="md-ellipsis">
+      Minimal one-shot chat
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -904,63 +904,63 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#run-from-a-clone" class="md-nav__link">
+  <a href="#install" class="md-nav__link">
     <span class="md-ellipsis">
-      Run from a clone
+      Install
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#install-or-build-a-binary" class="md-nav__link">
+  <a href="#compatibility-policy" class="md-nav__link">
     <span class="md-ellipsis">
-      Install or build a binary
+      Compatibility policy
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#one-shot-prompts-no-tui" class="md-nav__link">
+  <a href="#release-compatibility-checklist" class="md-nav__link">
     <span class="md-ellipsis">
-      One-shot prompts (no TUI)
+      Release compatibility checklist
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-command-surface" class="md-nav__link">
+  <a href="#stable-packages-and-primary-types" class="md-nav__link">
     <span class="md-ellipsis">
-      The command surface
+      Stable packages and primary types
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#offline-inspection" class="md-nav__link">
+  <a href="#experimental-packages" class="md-nav__link">
     <span class="md-ellipsis">
-      Offline inspection
+      Experimental packages
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#local-verification" class="md-nav__link">
+  <a href="#runnable-examples" class="md-nav__link">
     <span class="md-ellipsis">
-      Local verification
+      Runnable examples
     </span>
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#next-steps" class="md-nav__link">
+  <a href="#minimal-one-shot-chat" class="md-nav__link">
     <span class="md-ellipsis">
-      Next steps
+      Minimal one-shot chat
     </span>
   </a>
   
@@ -985,76 +985,199 @@
   
 
 
-<h1 id="getting-started">Getting started<a class="headerlink" href="#getting-started" title="Permanent link">&para;</a></h1>
-<blockquote>
-<p>Build atteler, run it from a clone, and explore the command surface offline.</p>
-</blockquote>
-<p>Atteler is a Go CLI for running LLM-assisted development workflows from a local
-repository: chat, provider routing, local context references, session history,
-review/watch scans, agent planning, and worktree isolation.</p>
-<h2 id="run-from-a-clone">Run from a clone<a class="headerlink" href="#run-from-a-clone" title="Permanent link">&para;</a></h2>
-<p>The quickest way to try atteler is to run it straight from a checkout:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>go<span class="w"> </span>run<span class="w"> </span>./cmd/atteler<span class="w"> </span><span class="nb">help</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>go<span class="w"> </span>run<span class="w"> </span>./cmd/atteler<span class="w"> </span>chat<span class="w"> </span>once<span class="w"> </span><span class="s2">&quot;Explain this repository&quot;</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>go<span class="w"> </span>run<span class="w"> </span>./cmd/atteler<span class="w"> </span>review<span class="w"> </span>scan
+<h1 id="go-sdk-surface">Go SDK surface<a class="headerlink" href="#go-sdk-surface" title="Permanent link">&para;</a></h1>
+<p>Atteler is SDK-first: the CLI and TUI are interfaces over reusable Go packages.
+Starting with the <code>v0.1.0</code> SDK contract, external callers should build against
+this documented surface instead of importing <code>cmd/atteler</code> internals.</p>
+<h2 id="install">Install<a class="headerlink" href="#install" title="Permanent link">&para;</a></h2>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>go<span class="w"> </span>get<span class="w"> </span>github.com/tommoulard/atteler@latest
 </span></code></pre></div>
-<h2 id="install-or-build-a-binary">Install or build a binary<a class="headerlink" href="#install-or-build-a-binary" title="Permanent link">&para;</a></h2>
-<p>Install the latest released binary, or build one locally with the Makefile:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>go<span class="w"> </span>install<span class="w"> </span>github.com/tommoulard/atteler/cmd/atteler@latest
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>make<span class="w"> </span>build
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>./atteler<span class="w"> </span><span class="nb">help</span>
+<p>Use version tags for production integrations. For source checkouts, run the
+package examples with:</p>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>go<span class="w"> </span><span class="nb">test</span><span class="w"> </span>./pkg/sdk<span class="w"> </span>./pkg/review<span class="w"> </span>./examples/...
 </span></code></pre></div>
-<p><code>make build</code> compiles <code>./atteler</code> from <code>./cmd/atteler</code>. The bare <code>atteler</code>
-command (or <code>make run</code>) launches the interactive TUI and requires a real
-terminal.</p>
-<h2 id="one-shot-prompts-no-tui">One-shot prompts (no TUI)<a class="headerlink" href="#one-shot-prompts-no-tui" title="Permanent link">&para;</a></h2>
-<p>Use <code>chat once</code> for a single, non-interactive completion:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>atteler<span class="w"> </span>chat<span class="w"> </span>once<span class="w"> </span><span class="s2">&quot;Explain this repository in one paragraph&quot;</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>atteler<span class="w"> </span>chat<span class="w"> </span>once<span class="w"> </span><span class="s2">&quot;Summarize&quot;</span><span class="w"> </span>--model<span class="w"> </span>openai/gpt-5.4
-</span></code></pre></div>
-<h2 id="the-command-surface">The command surface<a class="headerlink" href="#the-command-surface" title="Permanent link">&para;</a></h2>
-<p>Atteler keeps top-level help short and routes discoverability through focused
-domains. Run <code>atteler help</code> for the domain list, <code>atteler help &lt;domain&gt;</code> for one
-area, and <code>atteler help legacy</code> for the compatibility flag catalog. If you know
-an old flag name, <code>atteler help --code-summary</code> jumps to the domain that owns it.</p>
-<p>A few representative domains:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>atteler<span class="w"> </span>session<span class="w"> </span>list
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>atteler<span class="w"> </span>providers<span class="w"> </span>list
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>plan<span class="w"> </span><span class="s2">&quot;review auth changes&quot;</span>
-</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>atteler<span class="w"> </span>review<span class="w"> </span>scan
-</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>atteler<span class="w"> </span>worktrees<span class="w"> </span>run<span class="w"> </span><span class="s2">&quot;Add unit tests for auth&quot;</span>
-</span></code></pre></div>
-<p>Common options for model, agent, output, and provider routing can be combined
-with domain commands before or after the subcommand, for example
-<code>atteler session --session &lt;id&gt; messages</code>. See the
-<strong><a href="../cli-reference/">CLI reference</a></strong> for the full catalog.</p>
-<h2 id="offline-inspection">Offline inspection<a class="headerlink" href="#offline-inspection" title="Permanent link">&para;</a></h2>
-<p>These commands never hit the network or require credentials — useful in CI and
-for discovery:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>atteler<span class="w"> </span>config<span class="w"> </span>paths<span class="w">               </span><span class="c1"># config files in load order</span>
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>atteler<span class="w"> </span>config<span class="w"> </span>validate<span class="w">            </span><span class="c1"># check configuration</span>
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>atteler<span class="w"> </span>providers<span class="w"> </span>list<span class="w">             </span><span class="c1"># built-in provider names</span>
-</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>atteler<span class="w"> </span>providers<span class="w"> </span>known-models<span class="w">     </span><span class="c1"># built-in provider/model IDs, no API calls</span>
-</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>atteler<span class="w"> </span>providers<span class="w"> </span>resolve<span class="w"> </span>gpt-5.5<span class="w">  </span><span class="c1"># which provider/model a name resolves to</span>
-</span></code></pre></div>
-<p><code>atteler providers resolve &lt;model&gt;</code> is handy when routing is unclear: it prints
-the selected provider/model when resolution is safe, and otherwise lists every
-provider claim considered, with provenance markers so stale catalogs are not
-mistaken for fresh live ones.</p>
-<h2 id="local-verification">Local verification<a class="headerlink" href="#local-verification" title="Permanent link">&para;</a></h2>
-<p>Use the Makefile so pinned tool versions stay consistent:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>make<span class="w"> </span><span class="nb">test</span><span class="w">                                  </span><span class="c1"># full suite with -race -count=1</span>
-</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>make<span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="nv">TESTPACKAGE</span><span class="o">=</span>./pkg/llm<span class="w">            </span><span class="c1"># narrow to one package</span>
-</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>make<span class="w"> </span>lint<span class="w">                                  </span><span class="c1"># golangci-lint</span>
-</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>make<span class="w"> </span>all<span class="w">                                   </span><span class="c1"># generate, lint, test, build (CI)</span>
-</span></code></pre></div>
-<h2 id="next-steps">Next steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
+<h2 id="compatibility-policy">Compatibility policy<a class="headerlink" href="#compatibility-policy" title="Permanent link">&para;</a></h2>
+<p>The public SDK is intentionally narrower than <code>pkg/*</code> as a whole.</p>
 <ul>
-<li><a href="../configuration/">Configuration</a> — layered YAML config and generation knobs.</li>
-<li><a href="../providers/">Providers</a> — built-in providers and auth resolution.</li>
-<li><a href="../hooks/">Hooks</a> — lifecycle event hooks.</li>
-<li><a href="../cli-reference/">CLI reference</a> — the complete command and flag surface.</li>
+<li><strong>Stable packages</strong> preserve exported source compatibility across patch
+  releases and avoid breaking changes across minor releases without a documented
+  deprecation window and migration note.</li>
+<li>Within stable packages, exported identifiers are covered by that source
+  compatibility policy unless they are explicitly deprecated. The table below
+  calls out the primary types and functions external integrations should prefer.</li>
+<li><strong>Experimental packages</strong> are usable, tested library code, but their exported
+  APIs may change between releases while the workflow is still settling.</li>
+<li><strong><code>cmd/atteler</code> is not an SDK surface.</strong> Treat it as CLI/TUI wiring only.</li>
+<li>Security or correctness fixes may change behavior when preserving old behavior
+  would keep a bug, credential leak, or unsafe side effect.</li>
+<li>Before a future <code>v1.0.0</code>, compatibility is still best-effort under Go module
+  <code>v0</code> semantics, but changes to stable packages should be called out in release
+  notes with a migration path.</li>
 </ul>
+<p>The machine-readable source of the compatibility table is
+<code>pkg/sdk.APIContract()</code> and its policy text is exported as
+<code>pkg/sdk.CompatibilityPolicy</code>. The JSON envelope uses <code>schema_version</code>,
+<code>compatibility_policy</code>, and <code>packages</code>. Each package row uses stable snake-case
+fields: <code>import_path</code>, <code>stability</code>, <code>since</code>, <code>summary</code>, and optional
+<code>primary_identifiers</code> for stable package/type/function entry points. Stable
+package rows include <code>primary_identifiers</code>; experimental rows intentionally omit
+that field until a package is promoted into the stable surface.</p>
+<h2 id="release-compatibility-checklist">Release compatibility checklist<a class="headerlink" href="#release-compatibility-checklist" title="Permanent link">&para;</a></h2>
+<p>Before tagging a release that changes exported SDK code, maintainers should:</p>
+<ol>
+<li>Run <code>go test ./pkg/sdk ./pkg/review ./examples/...</code> so package examples,
+   review workflow contracts, and standalone SDK examples still compile and pass.</li>
+<li>Keep <code>pkg/sdk.APIContract()</code> synchronized with any package promoted into or
+   removed from the stable surface.</li>
+<li>Document any stable-package breaking change in release notes with the
+   deprecation window, migration path, and reason preserving old behavior is
+   unsafe or impractical.</li>
+<li>Avoid importing <code>cmd/atteler</code> from examples or SDK packages; reusable workflow
+   behavior should move into <code>pkg/*</code> APIs first.</li>
+</ol>
+<h2 id="stable-packages-and-primary-types">Stable packages and primary types<a class="headerlink" href="#stable-packages-and-primary-types" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Package</th>
+<th>Stable types/functions</th>
+<th>Use for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pkg/sdk</code></td>
+<td><code>RunOneShotChat</code>, <code>NewProviderRegistry</code>, <code>BuildMemoryIndex</code>, <code>NewReviewRun</code>, <code>RunPlugin</code>, <code>NewSession</code>, <code>AttachNewWorktree</code>, <code>APIContract</code>, <code>CompatibilityPolicy</code>, <code>Contract</code>, <code>PackageContract</code>, <code>Stability</code>, <code>PackageContracts</code>, <code>PackagesByStability</code></td>
+<td>Facade for common SDK workflows and compatibility metadata.</td>
+</tr>
+<tr>
+<td><code>pkg/llm</code></td>
+<td><code>Provider</code>, <code>Registry</code>, <code>CompleteParams</code>, <code>Response</code>, <code>Message</code>, <code>ToolDefinition</code>, <code>ResponseFormat</code>, streaming and embedding contracts</td>
+<td>Provider-agnostic model calls and provider registration.</td>
+</tr>
+<tr>
+<td><code>pkg/session</code></td>
+<td><code>Session</code>, <code>Store</code>, <code>New</code>, <code>NewStore</code>, <code>ExportOptions</code>, <code>HeadlessRun</code>, <code>MultiAgentRun</code></td>
+<td>Durable transcripts, exports, search/list metadata, and run receipts.</td>
+</tr>
+<tr>
+<td><code>pkg/memory</code></td>
+<td><code>Store</code>, <code>Document</code>, <code>Result</code>, <code>NewStore</code>, <code>Add</code>, <code>AddFile</code>, <code>Search</code>, <code>Save</code>, <code>Load</code></td>
+<td>Local text indexing/search for retrieval workflows.</td>
+</tr>
+<tr>
+<td><code>pkg/retrieval</code></td>
+<td><code>Query</code>, <code>Result</code>, chunking helpers</td>
+<td>Shared retrieval contracts across memory/vector callers.</td>
+</tr>
+<tr>
+<td><code>pkg/review</code></td>
+<td><code>Reviewer</code>, <code>Plan</code>, <code>RunPlanOptions</code>, <code>NewRunPlan</code>, <code>Report</code>, <code>Finding</code>, <code>GateCheck</code>, <code>ValidateReport</code>, <code>FormatPlan</code>, <code>FormatReport</code></td>
+<td>Review plans, report contracts, gate validation, and deterministic text rendering.</td>
+</tr>
+<tr>
+<td><code>pkg/plugin</code></td>
+<td><code>Manifest</code>, <code>PermissionSet</code>, <code>Policy</code>, <code>AcceptManifestPolicy</code>, <code>Registry</code>, <code>RunOptions</code>, <code>RunEntrypointWithOptions</code>, <code>RunResult</code></td>
+<td>Governed plugin discovery, contracts, dry runs, and bounded execution.</td>
+</tr>
+<tr>
+<td><code>pkg/worktree</code></td>
+<td><code>Info</code>, <code>CreateContext</code>, <code>MergeWithResultContext</code>, <code>MergeOptions</code>, <code>RemoveContext</code>, <code>WithAuditContext</code></td>
+<td>Session-scoped git worktrees and reviewed merge-back transactions.</td>
+</tr>
+<tr>
+<td><code>pkg/permission</code></td>
+<td><code>Policy</code>, <code>Request</code>, <code>Operation</code>, <code>Decision</code>, context helpers</td>
+<td>Central side-effect policy gates and audit metadata.</td>
+</tr>
+<tr>
+<td><code>pkg/events</code></td>
+<td><code>Event</code>, <code>Runner</code>, hook payload contracts</td>
+<td>Lifecycle event subscriptions and hook dispatch.</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>pkg/sdk</code> facade currently exports these source-compatible identifiers:
+<code>APIContract</code>, <code>APIContractSchemaVersion</code>, <code>AttachNewWorktree</code>, <code>AttachWorktree</code>,
+<code>BuildMemoryIndex</code>, <code>CompatibilityPolicy</code>, <code>Contract</code>, <code>MemoryIndexOptions</code>,
+<code>NewProviderRegistry</code>, <code>NewReviewRun</code>, <code>NewSession</code>, <code>OneShotChatOptions</code>,
+<code>OneShotChatResult</code>, <code>PackageContract</code>, <code>PackageContracts</code>,
+<code>PackagesByStability</code>, <code>PluginRunOptions</code>, <code>ReviewRun</code>, <code>ReviewRunOptions</code>,
+<code>RunOneShotChat</code>, <code>RunPlugin</code>, <code>SaveSession</code>, <code>SearchMemory</code>, <code>SessionOptions</code>,
+<code>Stability</code>, <code>StabilityExperimental</code>, <code>StabilityStable</code>, and <code>ValidateReport</code>.</p>
+<h2 id="experimental-packages">Experimental packages<a class="headerlink" href="#experimental-packages" title="Permanent link">&para;</a></h2>
+<p>These packages are useful for advanced integrations but are not yet covered by
+the stable compatibility promise: <code>pkg/agent</code>, <code>pkg/agentmemory</code>,
+<code>pkg/artifactmerge</code>, <code>pkg/async</code>, <code>pkg/autonomy</code>, <code>pkg/autopilot</code>,
+<code>pkg/codegraph</code>, <code>pkg/codeintel</code>, <code>pkg/config</code>, <code>pkg/contextpack</code>,
+<code>pkg/contextref</code>, <code>pkg/eval</code>, <code>pkg/feedback</code>, <code>pkg/githistory</code>,
+<code>pkg/incident</code>, <code>pkg/lsp</code>, <code>pkg/mcp</code>, <code>pkg/modelroute</code>, <code>pkg/privacy</code>,
+<code>pkg/promptcomplete</code>, <code>pkg/research</code>, <code>pkg/shell</code>, <code>pkg/skill</code>,
+<code>pkg/sourcepolicy</code>, <code>pkg/speculate</code>, <code>pkg/subagent</code>, <code>pkg/symphony</code>,
+<code>pkg/tasklist</code>, <code>pkg/vector</code>, and <code>pkg/watch</code>.</p>
+<p>If an integration needs one of these to become stable, open an issue describing
+which exported types need a compatibility contract and which behavior should be
+covered by examples/tests.</p>
+<h2 id="runnable-examples">Runnable examples<a class="headerlink" href="#runnable-examples" title="Permanent link">&para;</a></h2>
+<p>The <code>examples/</code> directory contains credential-free examples for the common SDK
+workflows requested by external callers:</p>
+<table>
+<thead>
+<tr>
+<th>Workflow</th>
+<th>Directory</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One-shot chat</td>
+<td><code>examples/one-shot-chat</code></td>
+</tr>
+<tr>
+<td>Provider registry</td>
+<td><code>examples/provider-registry</code></td>
+</tr>
+<tr>
+<td>Review run</td>
+<td><code>examples/review-run</code></td>
+</tr>
+<tr>
+<td>Memory indexing/search</td>
+<td><code>examples/memory-search</code></td>
+</tr>
+<tr>
+<td>Plugin execution</td>
+<td><code>examples/plugin-execution</code></td>
+</tr>
+<tr>
+<td>Worktree/session usage</td>
+<td><code>examples/worktree-session</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each directory is a small <code>main</code> package and is compiled by <code>go test
+./examples/...</code>. The package-level examples in <code>pkg/sdk</code> and <code>pkg/review</code> also
+run under <code>go test ./pkg/sdk ./pkg/review</code> and avoid live provider credentials
+by using local fake providers or deterministic review data.</p>
+<h2 id="minimal-one-shot-chat">Minimal one-shot chat<a class="headerlink" href="#minimal-one-shot-chat" title="Permanent link">&para;</a></h2>
+<div class="language-go highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nx">registry</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">NewProviderRegistry</span><span class="p">(</span><span class="nx">myProvider</span><span class="p">)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="p">}</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="nx">result</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">RunOneShotChat</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">OneShotChatOptions</span><span class="p">{</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="nx">Registry</span><span class="p">:</span><span class="w"> </span><span class="nx">registry</span><span class="p">,</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="nx">Model</span><span class="p">:</span><span class="w">    </span><span class="s">&quot;my-model&quot;</span><span class="p">,</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">    </span><span class="nx">Prompt</span><span class="p">:</span><span class="w">   </span><span class="s">&quot;Summarize this repository&quot;</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="p">})</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="p">}</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">result</span><span class="p">.</span><span class="nx">Response</span><span class="p">.</span><span class="nx">Content</span><span class="p">)</span>
+</span></code></pre></div>
+<p>For lower-level control, build <code>llm.CompleteParams</code> directly and call
+<code>(*llm.Registry).Complete</code> or <code>CompleteWithFallback</code>.</p>
 
 
 
@@ -1090,7 +1213,7 @@ mistaken for fresh live ones.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href=".." class="md-footer__link md-footer__link--prev" aria-label="Previous: Home">
+          <a href="../hooks/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Hooks">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1100,20 +1223,20 @@ mistaken for fresh live ones.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Home
+                Hooks
               </div>
             </div>
           </a>
         
         
           
-          <a href="../common-workflows/" class="md-footer__link md-footer__link--next" aria-label="Next: Common workflows">
+          <a href="../cli-reference/" class="md-footer__link md-footer__link--next" aria-label="Next: CLI reference">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Common workflows
+                CLI reference
               </div>
             </div>
             <div class="md-footer__button md-icon">

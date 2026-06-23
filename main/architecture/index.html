@@ -354,6 +354,25 @@
   
   
     <li class="md-tabs__item">
+      <a href="../sdk/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Go SDK
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
       <a href="../cli-reference/" class="md-tabs__link">
         
   
@@ -598,6 +617,28 @@
   
   
     <li class="md-nav__item">
+      <a href="../sdk/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Go SDK
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../cli-reference/" class="md-nav__link">
         
   
@@ -769,10 +810,10 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
         
           
-          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="0">
             
   
   
@@ -785,8 +826,8 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_9">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
             <span class="md-nav__icon md-icon"></span>
             Reference
           </label>
@@ -1058,7 +1099,7 @@ details live in <a href="../configuration/">Configuration</a>.</p>
 </table>
 <p>The code-intelligence support uses Go package loading plus a lightweight Python
 scanner in the shared incremental index, with optional managed LSP lookups.
-Atteler does not promise a separately versioned public SDK contract.</p>
+The stable public SDK boundary is documented in <a href="../sdk/">Go SDK</a>; packages outside that table remain experimental even when they live under <code>pkg/</code>.</p>
 <h2 id="streaming-completion-contract">Streaming completion contract<a class="headerlink" href="#streaming-completion-contract" title="Permanent link">&para;</a></h2>
 <p><code>llm.StreamProvider</code> implementations deliver <code>llm.Chunk</code> events, and a stream
 must finish with exactly one terminal event:</p>
