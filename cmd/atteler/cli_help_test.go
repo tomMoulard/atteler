@@ -1128,3 +1128,42 @@ func newCLIOptionsAndFlagSetForTest(t *testing.T) (*cliOptions, *flag.FlagSet) {
 
 	return &opts, fs
 }
+
+func TestAttelerArtifactPrivacyHintDetectsRepoLocalState(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		".atteler/runs/research/demo",
+		filepath.Join(t.TempDir(), ".atteler", "eval-report.json"),
+	} {
+		hint, ok := attelerArtifactPrivacyHint(path)
+		require.True(t, ok)
+		assert.Contains(t, hint, "ignored/private by default")
+		assert.Contains(t, hint, "review and redact")
+	}
+
+	hint, ok := attelerArtifactPrivacyHint("docs/reviewed-report.md")
+	assert.False(t, ok)
+	assert.Empty(t, hint)
+}
+
+func TestCLIFlagHelpMarksPrivateAttelerDefaults(t *testing.T) {
+	t.Parallel()
+
+	fs := newRegisteredFlagSetForTest(t)
+	for _, name := range []string{
+		"research-output",
+		"eval-report",
+		"task-file",
+		"memory-store",
+		"agent-memory-store",
+		"vector-store",
+		"spawn-ledger",
+		"merge-artifacts",
+		"record-response",
+	} {
+		cliFlag := fs.Lookup(name)
+		require.NotNil(t, cliFlag, "missing flag %s", name)
+		assert.Contains(t, cliFlag.Usage, "ignored/private", name)
+	}
+}

@@ -73,6 +73,7 @@ func runResearchCommandWithAutonomy(ctx context.Context, cwd string, input resea
 	}
 
 	fmt.Printf("Research run %s written to %s\n", result.RunID, result.Dir)
+	printAttelerArtifactPrivacyHint(result.Dir)
 
 	for _, file := range result.Files {
 		fmt.Println(filepath.Join(result.Dir, file))

@@ -2651,6 +2651,7 @@ func runMemoryCommandWithAutonomy(ctx context.Context, store *session.Store, opt
 		}
 
 		fmt.Printf("Purged %d memory document(s) from %s\n", removed, redactMemoryDisplay(redactor, opts.memoryStorePath))
+		printAttelerArtifactPrivacyHint(opts.memoryStorePath)
 		if memoryPurgeOnly(opts) {
 			return nil
 		}
@@ -2672,6 +2673,7 @@ func runMemoryCommandWithAutonomy(ctx context.Context, store *session.Store, opt
 		}
 
 		fmt.Printf("Rebuilt memory store at %s\n", redactMemoryDisplay(redactor, opts.memoryStorePath))
+		printAttelerArtifactPrivacyHint(opts.memoryStorePath)
 		fmt.Print(formatMemoryCorpusWithRedactor(mem, redactor))
 		if strings.TrimSpace(opts.memorySearch) == "" {
 			return nil
@@ -2697,6 +2699,7 @@ func runMemoryCommandWithAutonomy(ctx context.Context, store *session.Store, opt
 
 		if shouldReturnAfterMemoryRetention(opts) {
 			fmt.Printf("Applied %s memory retention to %s\n", memoryRetentionStatusText(maintenanceMem, opts), redactMemoryDisplay(redactor, opts.memoryStorePath))
+			printAttelerArtifactPrivacyHint(opts.memoryStorePath)
 			return nil
 		}
 	}
@@ -2714,6 +2717,7 @@ func runMemoryCommandWithAutonomy(ctx context.Context, store *session.Store, opt
 
 		if opts.memorySearch == "" && !opts.memoryListCorpus {
 			fmt.Printf("Indexed %d document(s) into %s\n", len(opts.memoryIndexFiles), redactMemoryDisplay(redactor, opts.memoryStorePath))
+			printAttelerArtifactPrivacyHint(opts.memoryStorePath)
 			return nil
 		}
 	}

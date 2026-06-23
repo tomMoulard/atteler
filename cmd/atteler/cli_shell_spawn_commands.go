@@ -527,6 +527,7 @@ func formatSpawnResults(results []subagent.Result) string {
 
 		if strings.TrimSpace(result.LedgerPath) != "" {
 			fmt.Fprintf(&b, "ledger=%s\n", result.LedgerPath)
+			b.WriteString(formatAttelerArtifactPrivacyHint(result.LedgerPath))
 		}
 
 		if strings.TrimSpace(result.AdmissionID) != "" {
@@ -539,11 +540,13 @@ func formatSpawnResults(results []subagent.Result) string {
 
 		if strings.TrimSpace(result.TranscriptPath) != "" {
 			fmt.Fprintf(&b, "transcript=%s\n", result.TranscriptPath)
+			b.WriteString(formatAttelerArtifactPrivacyHint(result.TranscriptPath))
 		}
 
 		for _, artifact := range result.Artifacts {
 			if strings.TrimSpace(artifact) != "" {
 				fmt.Fprintf(&b, "artifact=%s\n", artifact)
+				b.WriteString(formatAttelerArtifactPrivacyHint(artifact))
 			}
 		}
 

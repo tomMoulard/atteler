@@ -650,6 +650,7 @@ func printEvalReportText(report atteval.Report, reportPath string) {
 	}
 	if reportPath != "" {
 		fmt.Printf("report=%s\n", reportPath)
+		printAttelerArtifactPrivacyHint(reportPath)
 	}
 }
 

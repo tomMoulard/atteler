@@ -104,6 +104,30 @@ func TestRunAgentMemoryCommandPermissionPolicyDeniesStoreRead(t *testing.T) {
 	assert.Contains(t, err.Error(), "permission.read.deny")
 }
 
+//nolint:paralleltest // Captures process-wide stdout.
+func TestRunMemoryCommandIndexPrintsPrivacyHintForAttelerStore(t *testing.T) {
+	dir := t.TempDir()
+	note := filepath.Join(dir, "note.txt")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth callback retry memory"), 0o600))
+
+	storePath := filepath.Join(dir, ".atteler", "memory.json")
+	output := captureMemoryStdout(t, func() error {
+		return runMemoryCommand(t.Context(), session.NewStore(filepath.Join(dir, "sessions")), cliOptions{
+			memoryStorePath:  storePath,
+			memoryIndexFiles: stringListFlag{note},
+		})
+	})
+
+	assert.Contains(t, output, "Indexed 1 document(s) into "+storePath)
+	assert.Contains(t, output, "privacy_hint=")
+	assert.Contains(t, output, "ignored/private by default")
+	assert.Contains(t, output, "review and redact")
+
+	loaded, err := memory.Load(storePath)
+	require.NoError(t, err)
+	require.Len(t, loaded.Documents, 1)
+}
+
 func TestRunMemoryCommandPermissionPolicyDeniesStoreWrite(t *testing.T) {
 	t.Parallel()
 

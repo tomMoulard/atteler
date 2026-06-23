@@ -119,6 +119,33 @@ func TestRunVectorSearchPersistsLexicalIndexAndReportsVectorizer(t *testing.T) {
 	assert.NotContains(t, output, "rebuilt=true")
 }
 
+//nolint:paralleltest // Captures process stdout to verify user-facing CLI output.
+func TestRunVectorSearchIndexPrintsPrivacyHintForDefaultAttelerStore(t *testing.T) {
+	dir := t.TempDir()
+	note := filepath.Join(dir, "retrieval.md")
+	require.NoError(t, os.WriteFile(note, []byte("OAuth retry retrieval notes"), 0o600))
+
+	opts := cliOptions{
+		vectorIndexFiles: stringListFlag{note},
+	}
+
+	var runErr error
+
+	output := captureVectorSearchStdout(t, func() {
+		runErr = runVectorSearch(context.TODO(), dir, appconfig.VectorConfig{}, opts)
+	})
+	require.NoError(t, runErr)
+
+	indexPath := filepath.Join(dir, ".atteler", "vector-index.json")
+
+	assert.Contains(t, output, "Indexed 1 chunk(s)")
+	assert.Contains(t, output, "into "+indexPath)
+	assert.Contains(t, output, "privacy_hint=")
+	assert.Contains(t, output, "ignored/private by default")
+	assert.Contains(t, output, "review and redact")
+	require.FileExists(t, indexPath)
+}
+
 func TestRunVectorSearchPermissionPolicyDeniesIndexWrite(t *testing.T) {
 	t.Parallel()
 

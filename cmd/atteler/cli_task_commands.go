@@ -134,7 +134,15 @@ func runTaskListCommandWithAutonomy(ctx context.Context, sessionStore *session.S
 		return fmt.Errorf("task list: %w", err)
 	}
 
-	return action.run(ctx, store, input)
+	if err := action.run(ctx, store, input); err != nil {
+		return err
+	}
+
+	if taskCommandWritesFiles(input) {
+		printAttelerArtifactPrivacyHint(path)
+	}
+
+	return nil
 }
 
 func taskListActionForInput(input taskCommandInput) (taskListAction, bool) {

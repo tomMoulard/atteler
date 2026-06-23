@@ -92,7 +92,7 @@ atteler --agent-memory-search <value>
 
 ### `--agent-memory-store`
 
-JSON store for per-agent vector memory
+JSON store for per-agent vector memory; repo-local .atteler stores are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -1236,7 +1236,7 @@ atteler --eval-output <value>
 
 ### `--eval-report`
 
-Write machine-readable eval report JSON to this path
+Write machine-readable eval report JSON to this path; .atteler/eval-report*.json is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -2645,7 +2645,7 @@ atteler --memory-since <value>
 
 ### `--memory-store`
 
-JSON memory store path to load and/or save
+JSON memory store path to load and/or save; repo-local .atteler stores are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -2697,7 +2697,7 @@ atteler --merge-artifact-max-bytes <value>
 
 ### `--merge-artifacts`
 
-Write selected-session artifacts as a merged bundle; use '-' for stdout
+Write selected-session artifacts as a merged bundle; use '-' for stdout; repo-local .atteler bundles are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -2979,7 +2979,7 @@ atteler --record-failure <value>
 
 ### `--record-response`
 
-Record a one-shot response to this JSON file
+Record a one-shot response to this JSON file; raw .atteler/fixtures/*.json is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -3034,7 +3034,7 @@ atteler --replay-run <value>
 
 ### `--research-output`
 
-Directory for --research-run artifacts; defaults to .atteler/runs/research/<run-id>
+Directory for --research-run artifacts; defaults to ignored/private .atteler/runs/research/<run-id>
 
 - **Type:** string
 - **Default:** `""`
@@ -3695,7 +3695,7 @@ atteler --spawn-dry-run
 
 ### `--spawn-ledger`
 
-JSON execution ledger path for --spawn-agent/--async-run; defaults under .atteler/runs
+JSON execution ledger path for --spawn-agent/--async-run; defaults under ignored/private .atteler/runs
 
 - **Type:** string
 - **Default:** `""`
@@ -4014,7 +4014,7 @@ atteler --task-fail <value>
 
 ### `--task-file`
 
-JSON task-list file; defaults to .atteler/tasks.json
+JSON task-list file; defaults to ignored/private .atteler/tasks.json
 
 - **Type:** string
 - **Default:** `""`
@@ -4357,7 +4357,7 @@ atteler --vector-search <value>
 
 ### `--vector-store`
 
-JSON vector index path; defaults to vector.index_path or .atteler/vector-index.json
+JSON vector index path; defaults to vector.index_path or ignored/private .atteler/vector-index.json
 
 - **Type:** string
 - **Default:** `""`

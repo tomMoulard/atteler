@@ -240,6 +240,31 @@ func TestRunOnce_ReplaysResponseWithoutProvider(t *testing.T) {
 	assert.Positive(t, replayRef.SizeBytes)
 }
 
+//nolint:paralleltest // Captures process stdout while saveRecordedResponse prints the user-facing privacy hint.
+func TestSaveRecordedResponse_PrintsPrivacyHintForAttelerFixture(t *testing.T) {
+	dir := t.TempDir()
+	recordPath := filepath.Join(dir, ".atteler", "fixtures", "once.json")
+
+	stdout := captureProcessOutput(t, &os.Stdout)
+	require.NoError(t, saveRecordedResponse(t.Context(),
+		recordPath,
+		llm.CompleteParams{
+			Model: "gpt-test",
+			Messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: "hello",
+			}},
+		},
+		nil,
+		&llm.Response{Content: "recorded answer", Model: "gpt-test"},
+	))
+
+	line := requireLineBefore(t, stdout.lines, time.Second)
+	assert.Contains(t, line, "privacy_hint=")
+	assert.Contains(t, line, "ignored/private by default")
+	assert.Contains(t, line, "review and redact")
+}
+
 func TestSaveRecordedResponse_IncludesResponseFormat(t *testing.T) {
 	t.Parallel()
 

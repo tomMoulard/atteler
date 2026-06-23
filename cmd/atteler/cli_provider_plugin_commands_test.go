@@ -538,3 +538,22 @@ func TestSelectModelPersistsFolderModelMode(t *testing.T) {
 	assert.Equal(t, "openai/gpt-5.5", state.ModelForFolder(dir))
 	assert.Equal(t, llm.ModelModeFast, state.ModelModeForFolder(dir))
 }
+
+func TestFormatSpawnResults_PrintsPrivacyHintForAttelerArtifacts(t *testing.T) {
+	t.Parallel()
+
+	got := formatSpawnResults([]subagent.Result{{
+		Request:        subagent.Request{ID: "child-1", Agent: "reviewer"},
+		Status:         subagent.StatusSucceeded,
+		LedgerPath:     ".atteler/runs/spawn-demo/ledger.json",
+		TranscriptPath: ".atteler/runs/spawn-demo/child-1/transcript.jsonl",
+		Artifacts:      []string{".atteler/runs/spawn-demo/child-1.patch"},
+	}})
+
+	assert.Contains(t, got, "ledger=.atteler/runs/spawn-demo/ledger.json")
+	assert.Contains(t, got, "transcript=.atteler/runs/spawn-demo/child-1/transcript.jsonl")
+	assert.Contains(t, got, "artifact=.atteler/runs/spawn-demo/child-1.patch")
+	assert.GreaterOrEqual(t, strings.Count(got, "privacy_hint="), 3)
+	assert.Contains(t, got, "ignored/private by default")
+	assert.Contains(t, got, "review and redact")
+}
