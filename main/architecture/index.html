@@ -1031,8 +1031,9 @@ any whose credentials are unavailable. Provider implementations stay stateless
 and thread-safe — the registry creates instances on demand. See
 <a href="../providers/">Providers</a> for auth resolution and per-provider details.</p>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
-<p>YAML config is layered (XDG global → <code>./.atteler/</code> → <code>./.atteler.{yaml,yml}</code> →
-<code>ATTELER_CONFIG</code> paths), with lower-precedence defaults imported from sibling
+<p>YAML config is layered (XDG global → ignored/private <code>./.atteler/config.*</code> →
+reviewable <code>./.atteler.{yaml,yml}</code> → <code>ATTELER_CONFIG</code> paths), with
+lower-precedence defaults imported from sibling
 harnesses such as <code>~/.codex/config.toml</code>, <code>~/.claude/settings.json</code>, OpenCode
 config, and Forge <code>.forge.toml</code>. Generation knobs layer global <code>generation:</code> →
 per-agent → CLI overrides, and omitted values are not sent to providers. Full

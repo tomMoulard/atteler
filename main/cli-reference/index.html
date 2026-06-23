@@ -3019,7 +3019,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>atteler<span class="w"> </span>--agent-memory-search<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-agent-memory-store"><code>--agent-memory-store</code><a class="headerlink" href="#-agent-memory-store" title="Permanent link">&para;</a></h3>
-<p>JSON store for per-agent vector memory</p>
+<p>JSON store for per-agent vector memory; repo-local .atteler stores are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -3848,7 +3848,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-114-1"><a id="__codelineno-114-1" name="__codelineno-114-1" href="#__codelineno-114-1"></a>atteler<span class="w"> </span>--eval-output<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-eval-report"><code>--eval-report</code><a class="headerlink" href="#-eval-report" title="Permanent link">&para;</a></h3>
-<p>Write machine-readable eval report JSON to this path</p>
+<p>Write machine-readable eval report JSON to this path; .atteler/eval-report*.json is ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4286,7 +4286,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-170-1"><a id="__codelineno-170-1" name="__codelineno-170-1" href="#__codelineno-170-1"></a>atteler<span class="w"> </span>--incident-file<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-incident-mcp-manifest"><code>--incident-mcp-manifest</code><a class="headerlink" href="#-incident-mcp-manifest" title="Permanent link">&para;</a></h3>
-<p>MCP manifest YAML/JSON containing an observability incident tool</p>
+<p>MCP manifest YAML/JSON containing an observability incident tool; repo-local .atteler manifests are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4326,7 +4326,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-175-1"><a id="__codelineno-175-1" name="__codelineno-175-1" href="#__codelineno-175-1"></a>atteler<span class="w"> </span>--incident-open-pr
 </span></code></pre></div>
 <h3 id="-incident-pr-body"><code>--incident-pr-body</code><a class="headerlink" href="#-incident-pr-body" title="Permanent link">&para;</a></h3>
-<p>Write a redacted PR body template for the diagnosed incident</p>
+<p>Write a redacted PR body template for the diagnosed incident; repo-local .atteler drafts are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4342,7 +4342,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-177-1"><a id="__codelineno-177-1" name="__codelineno-177-1" href="#__codelineno-177-1"></a>atteler<span class="w"> </span>--incident-ref<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-incident-report"><code>--incident-report</code><a class="headerlink" href="#-incident-report" title="Permanent link">&para;</a></h3>
-<p>Write the redacted incident diagnosis report to this path</p>
+<p>Write the redacted incident diagnosis report to this path; repo-local .atteler reports are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4412,7 +4412,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-186-1"><a id="__codelineno-186-1" name="__codelineno-186-1" href="#__codelineno-186-1"></a>atteler<span class="w"> </span>--init-config<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-init-rtk-plugin"><code>--init-rtk-plugin</code><a class="headerlink" href="#-init-rtk-plugin" title="Permanent link">&para;</a></h3>
-<p>Write an RTK plugin scaffold to this directory and exit</p>
+<p>Write an RTK plugin scaffold to this directory and exit; repo-local .atteler/plugins scaffolds are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4756,7 +4756,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-230-1"><a id="__codelineno-230-1" name="__codelineno-230-1" href="#__codelineno-230-1"></a>atteler<span class="w"> </span>--mcp-capability<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-mcp-manifest"><code>--mcp-manifest</code><a class="headerlink" href="#-mcp-manifest" title="Permanent link">&para;</a></h3>
-<p>Validate/list or invoke an MCP manifest YAML/JSON file and exit</p>
+<p>Validate/list or invoke an MCP manifest YAML/JSON file and exit; repo-local .atteler manifests are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4959,7 +4959,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-256-1"><a id="__codelineno-256-1" name="__codelineno-256-1" href="#__codelineno-256-1"></a>atteler<span class="w"> </span>--memory-since<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-memory-store"><code>--memory-store</code><a class="headerlink" href="#-memory-store" title="Permanent link">&para;</a></h3>
-<p>JSON memory store path to load and/or save</p>
+<p>JSON memory store path to load and/or save; repo-local .atteler stores are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -4996,7 +4996,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-261-1"><a id="__codelineno-261-1" name="__codelineno-261-1" href="#__codelineno-261-1"></a>atteler<span class="w"> </span>--merge-artifact-max-bytes<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-merge-artifacts"><code>--merge-artifacts</code><a class="headerlink" href="#-merge-artifacts" title="Permanent link">&para;</a></h3>
-<p>Write selected-session artifacts as a merged bundle; use '-' for stdout</p>
+<p>Write selected-session artifacts as a merged bundle; use '-' for stdout; repo-local .atteler bundles are ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5200,7 +5200,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-287-1"><a id="__codelineno-287-1" name="__codelineno-287-1" href="#__codelineno-287-1"></a>atteler<span class="w"> </span>--record-failure<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-record-response"><code>--record-response</code><a class="headerlink" href="#-record-response" title="Permanent link">&para;</a></h3>
-<p>Record a one-shot response to this JSON file</p>
+<p>Record a one-shot response to this JSON file; raw .atteler/fixtures/*.json is ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5240,7 +5240,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-292-1"><a id="__codelineno-292-1" name="__codelineno-292-1" href="#__codelineno-292-1"></a>atteler<span class="w"> </span>--replay-run<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-research-output"><code>--research-output</code><a class="headerlink" href="#-research-output" title="Permanent link">&para;</a></h3>
-<p>Directory for --research-run artifacts; defaults to .atteler/runs/research/<run-id></p>
+<p>Directory for --research-run artifacts; defaults to ignored/private .atteler/runs/research/<run-id></p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5568,7 +5568,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-335-1"><a id="__codelineno-335-1" name="__codelineno-335-1" href="#__codelineno-335-1"></a>atteler<span class="w"> </span>--skill-learning-delete<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-skill-learning-dir"><code>--skill-learning-dir</code><a class="headerlink" href="#-skill-learning-dir" title="Permanent link">&para;</a></h3>
-<p>Automatic skill learning state directory</p>
+<p>Automatic skill learning state directory; repo-local .atteler/skill-learning is ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5632,7 +5632,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-343-1"><a id="__codelineno-343-1" name="__codelineno-343-1" href="#__codelineno-343-1"></a>atteler<span class="w"> </span>--skill-learning-show<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-skill-learning-skill-dir"><code>--skill-learning-skill-dir</code><a class="headerlink" href="#-skill-learning-skill-dir" title="Permanent link">&para;</a></h3>
-<p>Directory containing automatically generated skills</p>
+<p>Directory containing automatically generated skills; repo-local .atteler/skills/generated is ignored/private by default</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5662,7 +5662,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-347-1"><a id="__codelineno-347-1" name="__codelineno-347-1" href="#__codelineno-347-1"></a>atteler<span class="w"> </span>--skill-review-only
 </span></code></pre></div>
 <h3 id="-skill-save-dir"><code>--skill-save-dir</code><a class="headerlink" href="#-skill-save-dir" title="Permanent link">&para;</a></h3>
-<p>Persist accepted --skill-step suggestion as a reviewed skill directory</p>
+<p>Persist accepted --skill-step suggestion as a reviewed skill directory; use .atteler/skills/curated for committed skills</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5715,7 +5715,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-354-1"><a id="__codelineno-354-1" name="__codelineno-354-1" href="#__codelineno-354-1"></a>atteler<span class="w"> </span>--spawn-dry-run
 </span></code></pre></div>
 <h3 id="-spawn-ledger"><code>--spawn-ledger</code><a class="headerlink" href="#-spawn-ledger" title="Permanent link">&para;</a></h3>
-<p>JSON execution ledger path for --spawn-agent/--async-run; defaults under .atteler/runs</p>
+<p>JSON execution ledger path for --spawn-agent/--async-run; defaults under ignored/private .atteler/runs</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -5944,7 +5944,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-384-1"><a id="__codelineno-384-1" name="__codelineno-384-1" href="#__codelineno-384-1"></a>atteler<span class="w"> </span>--task-fail<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-task-file"><code>--task-file</code><a class="headerlink" href="#-task-file" title="Permanent link">&para;</a></h3>
-<p>JSON task-list file; defaults to .atteler/tasks.json</p>
+<p>JSON task-list file; defaults to ignored/private .atteler/tasks.json</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>
@@ -6191,7 +6191,7 @@ default to off unless noted; omitted values are not sent to providers.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-416-1"><a id="__codelineno-416-1" name="__codelineno-416-1" href="#__codelineno-416-1"></a>atteler<span class="w"> </span>--vector-search<span class="w"> </span>&lt;value&gt;
 </span></code></pre></div>
 <h3 id="-vector-store"><code>--vector-store</code><a class="headerlink" href="#-vector-store" title="Permanent link">&para;</a></h3>
-<p>JSON vector index path; defaults to vector.index_path or .atteler/vector-index.json</p>
+<p>JSON vector index path; defaults to vector.index_path or ignored/private .atteler/vector-index.json</p>
 <ul>
 <li><strong>Type:</strong> string</li>
 <li><strong>Default:</strong> <code>""</code></li>

@@ -1185,6 +1185,9 @@ messages while avoiding provider availability and sampling noise in tests.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>atteler<span class="w"> </span>chat<span class="w"> </span>once<span class="w"> </span><span class="s2">&quot;Summarize @README.md&quot;</span><span class="w"> </span>--record-response<span class="w"> </span>.atteler/fixtures/readme-summary.json
 </span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>atteler<span class="w"> </span>chat<span class="w"> </span>once<span class="w"> </span><span class="s2">&quot;Summarize @README.md&quot;</span><span class="w"> </span>--replay-response<span class="w"> </span>.atteler/fixtures/readme-summary.json
 </span></code></pre></div>
+<p>Recorded responses under <code>.atteler/fixtures/*.json</code> are raw provider outputs and
+are ignored/private by default. Commit only reviewed, redacted fixtures renamed
+to <code>.atteler/fixtures/**/*.fixture.{json,yaml,yml}</code>.</p>
 <h2 id="run-eval-checks">Run eval checks<a class="headerlink" href="#run-eval-checks" title="Permanent link">&para;</a></h2>
 <p>Assert against a recorded fixture or a structured eval suite. Reports are JSON
 with per-assertion status, evidence, pass rate, and run metrics for CI.</p>
@@ -1196,6 +1199,8 @@ with per-assertion status, evidence, pass rate, and run metrics for CI.</p>
 </span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span>--eval-report<span class="w"> </span>.atteler/eval-report.json
 </span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>atteler<span class="w"> </span><span class="nb">eval</span><span class="w"> </span>record<span class="w"> </span>reviewer<span class="w"> </span>--evaluation-report<span class="w"> </span>report.json
 </span></code></pre></div>
+<p><code>.atteler/eval-report*.json</code> and ad-hoc outputs are ignored/private by default;
+commit only reviewed suites named <code>.atteler/evals/**/*.eval.{json,yaml,yml}</code>.</p>
 <p>Suites combine required/forbidden content, regex, JSON/YAML path, schema,
 numeric, artifact, exit-code, and recorded judge assertions. Judge assertions
 only replay recorded decisions — the runner never calls a judge model. Golden
@@ -1292,7 +1297,8 @@ before implementation, architecture, dependency, security, or planning work:</p>
 </span></code></pre></div>
 <p>The MVP is local-first. It creates <code>.atteler/runs/research/&lt;run-id&gt;/</code> by
 default (or the directory passed with <code>--output</code> / <code>--research-output</code>) and
-writes:</p>
+writes ignored/private artifacts until you review and copy a redacted summary to
+a committed docs location:</p>
 <ul>
 <li><code>research.md</code> — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.</li>
@@ -1418,11 +1424,14 @@ policy envelope before execution. MCP servers are referenced through manifests
 </span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="w">  </span>--incident-mcp-tool<span class="w"> </span>get_incident
 </span></code></pre></div>
 <p>Plugin runs require an accepted local policy that acts as an upper bound;
-manifests requesting anything outside it fail before execution.</p>
+manifests requesting anything outside it fail before execution. MCP manifests
+under <code>.atteler/</code> are ignored/private by default because they can contain local
+server paths, tool arguments, or integration details.</p>
 <h2 id="synthesize-and-manage-skills">Synthesize and manage skills<a class="headerlink" href="#synthesize-and-manage-skills" title="Permanent link">&para;</a></h2>
 <p>Suggest a skill from repeated steps, then review the generated diff before
 saving. Automatic skill learning records redacted workflow observations and
-writes generated skills under <code>.atteler/skills/generated/</code>.</p>
+writes ignored/private generated skills under <code>.atteler/skills/generated/</code>.
+Commit only reviewed skills copied to <code>.atteler/skills/curated/</code>.</p>
 <div class="language-sh highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-suggest<span class="w"> </span>plan<span class="w"> </span>--skill-step<span class="w"> </span>code<span class="w"> </span>--skill-step<span class="w"> </span><span class="nb">test</span>
 </span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-list
 </span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-show<span class="w"> </span>k8s-investigation

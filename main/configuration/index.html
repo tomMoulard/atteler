@@ -1793,7 +1793,10 @@ search paths:</p>
 <li><strong>Global config</strong> — <code>$XDG_CONFIG_HOME/atteler/config.{yaml,yml,json}</code> (or
    <code>~/.config/atteler/...</code>).</li>
 <li><strong>Project config</strong> — <code>./.atteler/config.{yaml,yml,json}</code>, then
-   <code>./.atteler.{yaml,yml,json}</code>.</li>
+   <code>./.atteler.{yaml,yml,json}</code>. The <code>.atteler/config.*</code> form is
+   ignored/private by this repository's artifact policy; use root
+   <code>./.atteler.yaml</code>, <code>./.atteler.yml</code>, or <code>./.atteler.json</code> for reviewed
+   shared config.</li>
 <li><strong><code>ATTELER_CONFIG</code> / <code>--config</code></strong> — extra files (platform path-list
    separator); highest-precedence config files.</li>
 <li><strong>Runtime choices</strong> — persisted state, CLI flags (<code>--model</code>, generation
