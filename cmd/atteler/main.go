@@ -145,11 +145,22 @@ type llmResponseMsg struct {
 	toolLog                 []string // tool call summaries (command + truncated output)
 	tokenUsage              tokenUsage
 	liveEvents              bool
+	streamedContent         bool
 }
 
 type llmEventLineMsg struct {
 	liveCh <-chan tea.Msg
 	line   string
+}
+
+type llmStreamStartMsg struct {
+	liveCh <-chan tea.Msg
+	model  string
+}
+
+type llmStreamDeltaMsg struct {
+	liveCh  <-chan tea.Msg
+	content string
 }
 
 type llmToolOutputMsg struct {

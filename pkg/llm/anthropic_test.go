@@ -147,6 +147,141 @@ func TestAnthropicProvider_Complete(t *testing.T) {
 	}
 }
 
+func TestAnthropicProvider_CompleteStream(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotReq     anthropicRequest
+		gotHeaders http.Header
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err = io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"model":"claude-stream","usage":{"input_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &AnthropicProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "claude-stream",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	chunks := drainChunks(ch)
+	require.Len(t, chunks, 3)
+	assert.Equal(t, "hel", chunks[0].Content)
+	assert.False(t, chunks[0].Done)
+	assert.Equal(t, "lo", chunks[1].Content)
+	assert.False(t, chunks[1].Done)
+	assert.True(t, chunks[2].Done)
+
+	resp, err := CollectStream(chunksToStream(chunks))
+	require.NoError(t, err)
+
+	assert.True(t, gotReq.Stream)
+	assert.Equal(t, "text/event-stream", gotHeaders.Get("Accept"))
+	assert.Equal(t, "test-key", gotHeaders.Get("X-Api-Key"))
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, providerAnthropic, resp.Provider)
+	assert.Equal(t, "claude-stream", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 10, resp.InputTokens)
+	assert.Equal(t, 3, resp.CachedInputTokens)
+	assert.Equal(t, 2, resp.CacheWriteInputTokens)
+	assert.Equal(t, 2, resp.OutputTokens)
+	assert.Positive(t, resp.FirstTokenLatency)
+}
+
+func TestAnthropicProvider_CompleteStreamToolCall(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err := io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"model":"claude-tools","usage":{"input_tokens":5}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"echo hi\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`)
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &AnthropicProvider{
+		apiKey:  "test-key",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "claude-tools",
+		Messages: []Message{{Role: RoleUser, Content: "run"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+
+	assert.Equal(t, providerAnthropic, resp.Provider)
+	assert.Equal(t, "claude-tools", resp.Model)
+	assert.Equal(t, StopToolUse, resp.StopReason)
+	assert.Equal(t, 5, resp.InputTokens)
+	assert.Equal(t, 1, resp.OutputTokens)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "toolu_1", resp.ToolCalls[0].ID)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, map[string]any{"command": "echo hi"}, resp.ToolCalls[0].Input)
+}
+
 func TestAnthropicProvider_BearerAuth(t *testing.T) {
 	t.Parallel()
 

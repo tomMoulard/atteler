@@ -127,6 +127,113 @@ func TestOpenAIProvider_Complete(t *testing.T) {
 	}
 }
 
+func TestOpenAIProvider_CompleteStream(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotReq     openaiRequest
+		gotHeaders http.Header
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+
+		body, err := io.ReadAll(r.Body)
+		if !assert.NoError(t, err) {
+			return
+		}
+
+		if !assert.NoError(t, json.Unmarshal(body, &gotReq)) {
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err = io.WriteString(w, `data: {"model":"gpt-stream","choices":[{"delta":{"content":"hel"}}]}`+"\n\n")
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, `data: {"model":"gpt-stream","choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}`+"\n\n")
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, `data: {"model":"gpt-stream","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":3}}}`+"\n\n")
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, "data: [DONE]\n\n")
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{
+		apiKey:  "sk-test",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-stream",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	require.NoError(t, err)
+
+	chunks := drainChunks(ch)
+	require.Len(t, chunks, 3)
+	assert.Equal(t, "hel", chunks[0].Content)
+	assert.False(t, chunks[0].Done)
+	assert.Equal(t, "lo", chunks[1].Content)
+	assert.False(t, chunks[1].Done)
+	assert.True(t, chunks[2].Done)
+
+	resp, err := CollectStream(chunksToStream(chunks))
+	require.NoError(t, err)
+
+	assert.True(t, gotReq.Stream)
+	require.NotNil(t, gotReq.StreamOptions)
+	assert.True(t, gotReq.StreamOptions.IncludeUsage)
+	assert.Equal(t, "text/event-stream", gotHeaders.Get("Accept"))
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, providerOpenAI, resp.Provider)
+	assert.Equal(t, "gpt-stream", resp.Model)
+	assert.Equal(t, StopEndTurn, resp.StopReason)
+	assert.Equal(t, 7, resp.InputTokens)
+	assert.Equal(t, 3, resp.CachedInputTokens)
+	assert.Equal(t, 2, resp.OutputTokens)
+	assert.Positive(t, resp.FirstTokenLatency)
+}
+
+func TestOpenAIProvider_CompleteStreamToolCall(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, err := io.WriteString(w, `data: {"model":"gpt-tools","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\""}}]}}]}`+"\n\n")
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, `data: {"model":"gpt-tools","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo hi\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, "data: [DONE]\n\n")
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	p := &OpenAIProvider{
+		apiKey:  "sk-test",
+		baseURL: srv.URL,
+		client:  srv.Client(),
+	}
+
+	ch, err := p.CompleteStream(context.Background(), CompleteParams{
+		Model:    "gpt-tools",
+		Messages: []Message{{Role: RoleUser, Content: "run"}},
+	})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+
+	assert.Equal(t, providerOpenAI, resp.Provider)
+	assert.Equal(t, "gpt-tools", resp.Model)
+	assert.Equal(t, StopToolUse, resp.StopReason)
+	require.Len(t, resp.ToolCalls, 1)
+	assert.Equal(t, "call_1", resp.ToolCalls[0].ID)
+	assert.Equal(t, "bash", resp.ToolCalls[0].Name)
+	assert.Equal(t, map[string]any{"command": "echo hi"}, resp.ToolCalls[0].Input)
+}
+
 func TestBuildOpenAIRequest_ModelModeFastUsesPriorityServiceTier(t *testing.T) {
 	t.Parallel()
 
@@ -1207,7 +1314,7 @@ func TestOpenAICompatibleProviderCapabilityOverrideRejectsUnknownCapability(t *t
 	assert.Contains(t, err.Error(), "valid: text,chat,tools")
 }
 
-func TestOpenAICompatibleProviderCapabilityOverrideCannotAdvertiseStreamingWithoutStreamProvider(t *testing.T) {
+func TestOpenAICompatibleProviderCapabilityOverrideAdvertisesStreamingWithStreamProvider(t *testing.T) {
 	t.Parallel()
 
 	provider, err := NewOpenAICompatibleProviderWithConfigContext(context.Background(), "vllm", ProviderConfig{
@@ -1220,8 +1327,8 @@ func TestOpenAICompatibleProviderCapabilityOverrideCannotAdvertiseStreamingWitho
 
 	capabilities := provider.Capabilities()
 	assert.True(t, capabilities.SupportsChatCompletions)
-	assert.False(t, capabilities.SupportsStreaming)
-	assert.NotContains(t, providerRouteCapabilities(provider), modelroute.CapabilityStreaming)
+	assert.True(t, capabilities.SupportsStreaming)
+	assert.Contains(t, providerRouteCapabilities(provider), modelroute.CapabilityStreaming)
 }
 
 func TestOpenAICompatibleProviderCapabilityOverrideRejectsUnsupportedTools(t *testing.T) {

@@ -198,7 +198,7 @@ func completeMultiAgentRegistryCall(
 	fallbackModels []string,
 ) (*llm.Response, error) {
 	if recorder == nil {
-		resp, err := registry.CompleteWithFallback(ctx, params, fallbackModels)
+		resp, err := completeRegistryStreamWithFallback(ctx, registry, params, fallbackModels)
 		if err != nil {
 			return resp, fmt.Errorf("multi-agent registry complete: %w", err)
 		}
@@ -235,7 +235,7 @@ func completeWithRegistry(
 	registry *llm.Registry,
 ) func(context.Context, llm.CompleteParams, []string) (*llm.Response, error) {
 	return func(ctx context.Context, params llm.CompleteParams, _ []string) (*llm.Response, error) {
-		return registry.Complete(ctx, params)
+		return completeRegistryStream(ctx, registry, params)
 	}
 }
 

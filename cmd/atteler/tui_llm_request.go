@@ -65,12 +65,13 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 			})
 		}
 
-		resp, err := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
+		resp, streamedContent, err := completeLLMResponseStream(ctx, reg, params, request)
 		if err != nil {
 			return finishLLMResponse(request.liveCh, llmResponseMsg{
-				err:         err,
-				completedAt: time.Now(),
-				eventLines:  eventLines.Lines(),
+				err:             err,
+				completedAt:     time.Now(),
+				eventLines:      eventLines.Lines(),
+				streamedContent: streamedContent,
 			})
 		}
 
@@ -95,7 +96,8 @@ func callLLM(ctx context.Context, reg *llm.Registry, request llmRequest) tea.Cmd
 				FallbackModels:  request.fallbackModels,
 				ReferencedFiles: sessionFileReferencesFromLLMRequest(request),
 			}),
-			tokenUsage: usage,
+			tokenUsage:      usage,
+			streamedContent: streamedContent,
 		})
 	}
 }
@@ -123,6 +125,14 @@ func listenForLLMLiveMessage(liveCh <-chan tea.Msg) tea.Cmd {
 			typed.liveCh = liveCh
 
 			return typed
+		case llmStreamStartMsg:
+			typed.liveCh = liveCh
+
+			return typed
+		case llmStreamDeltaMsg:
+			typed.liveCh = liveCh
+
+			return typed
 		case llmToolOutputMsg:
 			typed.liveCh = liveCh
 
@@ -131,6 +141,117 @@ func listenForLLMLiveMessage(liveCh <-chan tea.Msg) tea.Cmd {
 			return msg
 		}
 	}
+}
+
+func completeLLMResponseStream(
+	ctx context.Context,
+	reg *llm.Registry,
+	params llm.CompleteParams,
+	request llmRequest,
+) (*llm.Response, bool, error) {
+	ch, err := reg.CompleteStreamWithFallback(ctx, params, request.fallbackModels)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, false, fmt.Errorf("llm stream complete with fallback: %w", err)
+		}
+
+		resp, fallbackErr := reg.CompleteWithFallback(ctx, params, request.fallbackModels)
+		normalizeStreamedRegistryResponse(reg, resp, params.Model)
+
+		if fallbackErr != nil {
+			return resp, false, fmt.Errorf("%w", fallbackErr)
+		}
+
+		return resp, false, nil
+	}
+
+	resp, streamedContent, err := collectLLMStreamForTUI(ctx, request.liveCh, ch, params.Model)
+	normalizeStreamedRegistryResponse(reg, resp, params.Model)
+
+	if err != nil {
+		return resp, streamedContent, fmt.Errorf("collect LLM stream: %w", err)
+	}
+
+	return resp, streamedContent, nil
+}
+
+func collectLLMStreamForTUI(
+	ctx context.Context,
+	liveCh chan<- tea.Msg,
+	ch <-chan llm.Chunk,
+	requestedModel string,
+) (*llm.Response, bool, error) {
+	if liveCh == nil {
+		resp, err := llm.CollectStream(ch)
+		if err != nil {
+			return resp, false, fmt.Errorf("collect stream: %w", err)
+		}
+
+		return resp, false, nil
+	}
+
+	return collectLiveLLMStreamForTUI(ctx, liveCh, ch, requestedModel)
+}
+
+func collectLiveLLMStreamForTUI(
+	ctx context.Context,
+	liveCh chan<- tea.Msg,
+	ch <-chan llm.Chunk,
+	requestedModel string,
+) (*llm.Response, bool, error) {
+	forwarded := make(chan llm.Chunk, llm.DefaultStreamBuffer)
+	streamed := make(chan bool, 1)
+
+	go func() {
+		defer close(forwarded)
+
+		streamStarted := false
+		streamedContent := false
+		currentModel := requestedModel
+
+		defer func() {
+			streamed <- streamedContent
+		}()
+
+		for chunk := range ch {
+			if chunk.Model != "" {
+				currentModel = chunk.Model
+			}
+
+			if chunk.Content != "" {
+				if !streamStarted {
+					liveCh <- llmStreamStartMsg{model: firstNonEmptyString(currentModel, requestedModel)}
+
+					streamStarted = true
+				}
+
+				liveCh <- llmStreamDeltaMsg{content: chunk.Content}
+
+				streamedContent = true
+			}
+
+			select {
+			case forwarded <- chunk:
+			case <-ctx.Done():
+				forwarded <- llm.Chunk{Err: ctx.Err()}
+
+				return
+			}
+
+			if chunk.Err != nil || chunk.Done {
+				return
+			}
+		}
+	}()
+
+	resp, err := llm.CollectStream(forwarded)
+
+	streamedContent := <-streamed
+	if err != nil {
+		return resp, streamedContent, fmt.Errorf("collect stream: %w", err)
+	}
+
+	return resp, streamedContent, nil
 }
 
 // callLLMWithTools runs an agent loop where the LLM can execute built-in tools.
@@ -175,7 +296,10 @@ func callLLMWithTools(
 		"messages", len(params.Messages),
 	)
 
-	var toolLog []string
+	var (
+		toolLog     []string
+		streamState = liveLLMStreamState{currentModel: params.Model}
+	)
 
 	executor := func(ctx context.Context, call llm.ToolCall) llm.ToolResult {
 		if llm.IsFileToolName(call.Name) {
@@ -311,6 +435,7 @@ func callLLMWithTools(
 		ConfirmContinue:    confirmContinueFn,
 		ConfirmToolCall:    confirmToolFn,
 		BeforeModelCall:    agentLoopManifestPreflight(ctx, reg, request),
+		OnStreamChunk:      liveLLMStreamChunkCallback(request.liveCh, &streamState),
 		Budget:             request.agentLoopBudget,
 		Autonomy:           request.autonomy,
 		EstimateCostMicros: costEstimator,
@@ -320,11 +445,12 @@ func callLLMWithTools(
 	})
 	if err != nil {
 		return llmResponseMsg{
-			err:         agentLoopError(err, request.agentLoopCheckpointPath),
-			completedAt: time.Now(),
-			eventLines:  eventLines.Lines(),
-			toolLog:     toolLog,
-			liveEvents:  request.liveCh != nil,
+			err:             agentLoopError(err, request.agentLoopCheckpointPath),
+			completedAt:     time.Now(),
+			eventLines:      eventLines.Lines(),
+			toolLog:         toolLog,
+			liveEvents:      request.liveCh != nil,
+			streamedContent: streamState.anyContent,
 		}
 	}
 
@@ -354,9 +480,10 @@ func callLLMWithTools(
 			FallbackModels:  request.fallbackModels,
 			ReferencedFiles: sessionFileReferencesFromLLMRequest(request),
 		}),
-		toolLog:    toolLog,
-		tokenUsage: usage,
-		liveEvents: request.liveCh != nil,
+		toolLog:         toolLog,
+		tokenUsage:      usage,
+		liveEvents:      request.liveCh != nil,
+		streamedContent: streamState.finalContent,
 	}
 }
 
@@ -390,6 +517,53 @@ func sendLiveLLMToolOutput(liveCh chan<- tea.Msg, command string, chunk attshell
 		stream:   string(chunk.Stream),
 		data:     string(chunk.Data),
 		sequence: chunk.Sequence,
+	}
+}
+
+type liveLLMStreamState struct {
+	currentModel       string
+	started            bool
+	anyContent         bool
+	currentCallContent bool
+	finalContent       bool
+}
+
+func liveLLMStreamChunkCallback(liveCh chan<- tea.Msg, state *liveLLMStreamState) func(llm.Chunk) {
+	if liveCh == nil {
+		return nil
+	}
+
+	return func(chunk llm.Chunk) {
+		if chunk.Model != "" {
+			state.currentModel = chunk.Model
+		}
+
+		if chunk.Content != "" {
+			if !state.started {
+				liveCh <- llmStreamStartMsg{model: state.currentModel}
+
+				state.started = true
+			}
+
+			liveCh <- llmStreamDeltaMsg{content: chunk.Content}
+
+			state.anyContent = true
+			state.currentCallContent = true
+		}
+
+		if chunk.Done {
+			if chunk.StopReason != llm.StopToolUse && len(chunk.ToolCalls) == 0 {
+				state.finalContent = state.currentCallContent
+			}
+
+			state.currentCallContent = false
+			state.started = false
+		}
+
+		if chunk.Err != nil {
+			state.currentCallContent = false
+			state.started = false
+		}
 	}
 }
 

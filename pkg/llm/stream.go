@@ -17,6 +17,8 @@ const (
 	// while still making slow consumers apply backpressure instead of letting
 	// providers build unbounded in-memory token queues.
 	DefaultStreamBuffer = 2
+
+	sseDonePayload = "[DONE]"
 )
 
 // ErrStreamIncomplete is returned when a stream closes before sending a final
@@ -32,9 +34,14 @@ var ErrStreamIncomplete = errors.New("llm: stream ended without final successful
 // Closing the channel without a terminal success chunk is an incomplete
 // response, not success. Error chunks are terminal; providers should close the
 // channel after sending one and must not send more content after Err.
+//
+//nolint:govet // Field order keeps the public stream contract grouped by meaning; Chunk values are transient.
 type Chunk struct {
 	// Content is the token or token group text.
 	Content string
+
+	// Provider is set when the producer knows which provider emitted the chunk.
+	Provider string
 
 	// Model is set once the provider reports the resolved model (may be empty
 	// until the stream finishes or a metadata event arrives).
@@ -51,6 +58,11 @@ type Chunk struct {
 	// ToolCalls is populated on the final chunk when the provider reports
 	// tool-use requests.
 	ToolCalls []ToolCall
+
+	// ProviderFailureMetadata carries fallback/provider failure metadata on the
+	// final successful chunk when a stream succeeds after earlier fallback
+	// attempts failed.
+	ProviderFailureMetadata map[string]string
 
 	// FirstTokenLatency may be populated as soon as the first content token is
 	// observed. Usage is populated on the final chunk when the provider reports
@@ -162,25 +174,27 @@ func (r *Registry) completeStreamResolvedWithFallback(
 		return r.completeStreamResolved(ctx, params)
 	}
 
-	var failures []error
+	var failures []fallbackAttemptFailure
 
 	for _, model := range models {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("llm: stream fallback canceled: %w", err)
 		}
 
+		target := r.fallbackAttemptTarget(model)
+
 		next := params
 		next.Model = model
 
 		ch, err := r.completeStreamResolved(ctx, next)
 		if err == nil {
-			return ch, nil
+			return r.streamWithSuccessfulFallbackMetadata(ctx, ch, failures), nil
 		}
 
-		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+		failures = append(failures, newFallbackAttemptFailure(model, target, err))
 	}
 
-	return nil, r.withReadinessContext(fmt.Errorf("llm: all stream fallback models failed: %w", joinFallbackFailures(failures)))
+	return nil, newFallbackError(failures, r.streamReadinessReport())
 }
 
 // CompleteStreamWithFallback tries params.Model followed by fallbackModels
@@ -212,11 +226,21 @@ func (r *Registry) CompleteStreamWithFallback(
 		return r.CompleteStream(ctx, params)
 	}
 
-	var failures []error
+	var failures []fallbackAttemptFailure
+
+	rateLimitedProviders := make(map[string]fallbackAttemptFailure)
 
 	for _, model := range models {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("llm: stream fallback canceled: %w", err)
+		}
+
+		target := r.fallbackAttemptTarget(model)
+		if skipped, ok := r.skippedFallbackFailure(model, target, rateLimitedProviders); ok {
+			failures = append(failures, skipped)
+			r.recordFallbackFailure(model, target, skipped)
+
+			continue
 		}
 
 		next := params
@@ -224,13 +248,18 @@ func (r *Registry) CompleteStreamWithFallback(
 
 		ch, err := r.CompleteStream(ctx, next)
 		if err == nil {
-			return ch, nil
+			return r.streamWithSuccessfulFallbackMetadata(ctx, ch, failures), nil
 		}
 
-		failures = append(failures, fmt.Errorf("%s via %s: %w", model, r.modelResolutionLabel(model), err))
+		failure := newFallbackAttemptFailure(model, target, err)
+		failures = append(failures, failure)
+
+		if failure.classification.RateLimited && target.providerName != "" {
+			rateLimitedProviders[target.providerName] = failure
+		}
 	}
 
-	return nil, r.withReadinessContext(fmt.Errorf("llm: all stream fallback models failed: %w", joinFallbackFailures(failures)))
+	return nil, newFallbackError(failures, r.streamReadinessReport())
 }
 
 // StreamFromComplete wraps a non-streaming Complete call as a single-chunk
@@ -256,16 +285,18 @@ func streamFromResponse(resp *Response) <-chan Chunk {
 
 	ch := make(chan Chunk, DefaultStreamBuffer)
 	ch <- Chunk{
-		Content:               resp.Content,
-		Model:                 resp.Model,
-		Done:                  true,
-		StopReason:            resp.StopReason,
-		ToolCalls:             append([]ToolCall(nil), resp.ToolCalls...),
-		FirstTokenLatency:     resp.FirstTokenLatency,
-		InputTokens:           resp.InputTokens,
-		CachedInputTokens:     resp.CachedInputTokens,
-		CacheWriteInputTokens: resp.CacheWriteInputTokens,
-		OutputTokens:          resp.OutputTokens,
+		Content:                 resp.Content,
+		Provider:                resp.Provider,
+		Model:                   resp.Model,
+		Done:                    true,
+		StopReason:              resp.StopReason,
+		ToolCalls:               append([]ToolCall(nil), resp.ToolCalls...),
+		FirstTokenLatency:       resp.FirstTokenLatency,
+		InputTokens:             resp.InputTokens,
+		CachedInputTokens:       resp.CachedInputTokens,
+		CacheWriteInputTokens:   resp.CacheWriteInputTokens,
+		OutputTokens:            resp.OutputTokens,
+		ProviderFailureMetadata: resp.ProviderFailureMetadata(),
 	}
 
 	close(ch)
@@ -292,25 +323,19 @@ func (r *Registry) observeCompletionStream(
 				firstTokenLatency = chunk.FirstTokenLatency
 			}
 
-			select {
-			case out <- chunk:
-			case <-ctx.Done():
+			chunk = observedStreamChunk(chunk, providerName, requestedModel, firstTokenLatency)
+			if !forwardObservedStreamChunk(ctx, out, chunk) {
 				r.recordRouteFailure(providerName, requestedModel, ctx.Err())
 
 				return
 			}
 
-			if chunk.Err != nil {
+			switch {
+			case chunk.Err != nil:
 				r.recordRouteFailure(providerName, requestedModel, chunk.Err)
 
 				return
-			}
-
-			if chunk.Done {
-				if chunk.FirstTokenLatency <= 0 {
-					chunk.FirstTokenLatency = firstTokenLatency
-				}
-
+			case chunk.Done:
 				r.recordRouteObservation(providerName, requestedModel, responseFromStreamChunk(chunk), time.Since(startedAt))
 
 				return
@@ -323,8 +348,34 @@ func (r *Registry) observeCompletionStream(
 	return out
 }
 
+func observedStreamChunk(chunk Chunk, providerName, requestedModel string, firstTokenLatency time.Duration) Chunk {
+	if chunk.Provider == "" {
+		chunk.Provider = providerName
+	}
+
+	if chunk.Model == "" {
+		chunk.Model = requestedModel
+	}
+
+	if chunk.Done && chunk.FirstTokenLatency <= 0 {
+		chunk.FirstTokenLatency = firstTokenLatency
+	}
+
+	return chunk
+}
+
+func forwardObservedStreamChunk(ctx context.Context, out chan<- Chunk, chunk Chunk) bool {
+	select {
+	case out <- chunk:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func responseFromStreamChunk(chunk Chunk) *Response {
 	return &Response{
+		Provider:              chunk.Provider,
 		Model:                 chunk.Model,
 		StopReason:            chunk.StopReason,
 		ToolCalls:             append([]ToolCall(nil), chunk.ToolCalls...),
@@ -333,6 +384,7 @@ func responseFromStreamChunk(chunk Chunk) *Response {
 		CachedInputTokens:     chunk.CachedInputTokens,
 		CacheWriteInputTokens: chunk.CacheWriteInputTokens,
 		OutputTokens:          chunk.OutputTokens,
+		metadata:              cloneStringMap(chunk.ProviderFailureMetadata),
 	}
 }
 
@@ -364,6 +416,10 @@ func CompleteStreamOrFallback(ctx context.Context, p Provider, params CompletePa
 // so CollectStream returns as soon as it sees one instead of waiting for the
 // channel to close.
 func CollectStream(ch <-chan Chunk) (*Response, error) {
+	return collectStream(ch, nil)
+}
+
+func collectStream(ch <-chan Chunk, onChunk func(Chunk)) (*Response, error) {
 	if ch == nil {
 		return &Response{}, ErrStreamIncomplete
 	}
@@ -373,10 +429,22 @@ func CollectStream(ch <-chan Chunk) (*Response, error) {
 	resp := &Response{}
 
 	for c := range ch {
+		if onChunk != nil {
+			onChunk(c)
+		}
+
 		b.WriteString(c.Content)
+
+		if c.Provider != "" {
+			resp.Provider = c.Provider
+		}
 
 		if c.Model != "" {
 			resp.Model = c.Model
+		}
+
+		if len(c.ProviderFailureMetadata) > 0 {
+			resp.metadata = mergeResponseMetadata(resp.metadata, c.ProviderFailureMetadata)
 		}
 
 		if c.Err != nil {
@@ -406,4 +474,77 @@ func CollectStream(ch <-chan Chunk) (*Response, error) {
 	resp.Content = b.String()
 
 	return resp, ErrStreamIncomplete
+}
+
+func (r *Registry) streamWithSuccessfulFallbackMetadata(
+	ctx context.Context,
+	ch <-chan Chunk,
+	failures []fallbackAttemptFailure,
+) <-chan Chunk {
+	if len(failures) == 0 {
+		return ch
+	}
+
+	metadata := fallbackMetadataForAttempts(failures, r.streamReadinessReport())
+	if len(metadata) == 0 {
+		return ch
+	}
+
+	out := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(out)
+
+		for chunk := range ch {
+			if chunk.Done {
+				chunk.ProviderFailureMetadata = mergeResponseMetadata(chunk.ProviderFailureMetadata, metadata)
+			}
+
+			if !sendStreamChunk(ctx, out, chunk) {
+				select {
+				case out <- Chunk{Err: ctx.Err()}:
+				default:
+				}
+
+				return
+			}
+		}
+	}()
+
+	return out
+}
+
+func (r *Registry) streamReadinessReport() ProviderReadinessReport {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.readinessReportLocked()
+}
+
+func sendStreamChunk(ctx context.Context, ch chan<- Chunk, chunk Chunk) bool {
+	select {
+	case ch <- chunk:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendStreamTerminalError(ctx context.Context, ch chan<- Chunk, err error) {
+	if err == nil {
+		return
+	}
+
+	chunk := Chunk{Err: err}
+
+	select {
+	case ch <- chunk:
+		return
+	default:
+	}
+
+	select {
+	case ch <- chunk:
+	case <-ctx.Done():
+	}
 }

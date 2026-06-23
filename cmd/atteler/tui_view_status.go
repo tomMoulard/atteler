@@ -1049,7 +1049,7 @@ func requestIdleSuggestion(
 			}
 		}
 
-		resp, err := reg.CompleteWithFallback(reqCtx, params, fallbackModels)
+		resp, err := completeRegistryStreamWithFallback(reqCtx, reg, params, fallbackModels)
 		if err != nil {
 			return idleSuggestionMsg{
 				id:                    id,

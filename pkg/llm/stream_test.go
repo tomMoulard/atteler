@@ -465,6 +465,53 @@ func TestRegistry_CompleteStreamWithModelRoleFallsBackOnSetupFailure(t *testing.
 	require.Len(t, codex.streamCalls, 1)
 }
 
+func TestRegistry_CompleteStreamWithFallbackPreservesSuccessfulFallbackMetadata(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	r.SetRetry(retryConfig{})
+
+	openAI := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerOpenAI,
+			models: []string{"gpt-primary"},
+		},
+		streamErr: errors.New(`openai: HTTP 429: {"error":{"type":"rate_limit_error","message":"slow down"}}`),
+	}
+	anthropic := &fakeStreamProvider{
+		fakeProvider: fakeProvider{
+			name:   providerAnthropic,
+			models: []string{"claude-fallback"},
+		},
+		chunks: []Chunk{
+			{Content: "fallback", Model: "claude-fallback"},
+			{Done: true, Model: "claude-fallback", StopReason: StopEndTurn},
+		},
+	}
+
+	r.Register(openAI)
+	r.Register(anthropic)
+
+	ch, err := r.CompleteStreamWithFallback(context.Background(), CompleteParams{
+		Model: "openai/gpt-primary",
+	}, []string{"anthropic/claude-fallback"})
+	require.NoError(t, err)
+
+	resp, err := CollectStream(ch)
+	require.NoError(t, err)
+
+	assert.Equal(t, "fallback", resp.Content)
+	assert.Equal(t, providerAnthropic, resp.Provider)
+	assert.Equal(t, "claude-fallback", resp.Model)
+
+	metadata := resp.ProviderFailureMetadata()
+	require.NotEmpty(t, metadata)
+	assert.Contains(t, metadata["fallback_failure_classifications"], providerOpenAI+"="+string(providerFailureRateLimit))
+	assert.Contains(t, metadata["fallback_attempts"], "openai/gpt-primary")
+	assert.Contains(t, metadata["fallback_rate_limit_scopes"], "="+modelroute.RateLimitScopeProvider)
+	assert.Equal(t, providerOpenAI, metadata["rate_limited_providers"])
+}
+
 func TestRegistry_CompleteStreamRecordsRouteTelemetry(t *testing.T) {
 	t.Parallel()
 
@@ -603,4 +650,15 @@ func drainChunks(ch <-chan Chunk) []Chunk {
 	}
 
 	return chunks
+}
+
+func chunksToStream(chunks []Chunk) <-chan Chunk {
+	ch := make(chan Chunk, len(chunks))
+	for i := range chunks {
+		ch <- chunks[i]
+	}
+
+	close(ch)
+
+	return ch
 }

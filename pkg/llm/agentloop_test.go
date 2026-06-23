@@ -44,6 +44,63 @@ func (p *agentTestProvider) FetchModels(_ context.Context) ([]string, error) {
 func (p *agentTestProvider) ModelContextWindow(_ string) int { return 128_000 }
 func (p *agentTestProvider) Name() string                    { return "test" }
 
+type agentStreamTestProvider struct {
+	chunks       []Chunk
+	seenMessages [][]Message
+	streamCalls  int
+}
+
+func (p *agentStreamTestProvider) Complete(context.Context, CompleteParams) (*Response, error) {
+	return nil, errors.New("buffered completion should not be used")
+}
+
+func (p *agentStreamTestProvider) CompleteStream(ctx context.Context, params CompleteParams) (<-chan Chunk, error) {
+	p.streamCalls++
+	p.seenMessages = append(p.seenMessages, append([]Message(nil), params.Messages...))
+
+	ch := make(chan Chunk, DefaultStreamBuffer)
+
+	go func() {
+		defer close(ch)
+
+		for i := range p.chunks {
+			select {
+			case ch <- p.chunks[i]:
+			case <-ctx.Done():
+				ch <- Chunk{Err: ctx.Err()}
+
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+func (p *agentStreamTestProvider) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{
+		SupportsChatCompletions: true,
+		SupportsTools:           true,
+		SupportsStreaming:       true,
+	}
+}
+
+func (p *agentStreamTestProvider) Models() []string                  { return []string{"test-model"} }
+func (p *agentStreamTestProvider) HealthCheck(context.Context) error { return nil }
+func (p *agentStreamTestProvider) FetchModels(context.Context) ([]string, error) {
+	return []string{"test-model"}, nil
+}
+func (p *agentStreamTestProvider) ModelContextWindow(string) int { return 128_000 }
+func (p *agentStreamTestProvider) Name() string                  { return "stream-test" }
+
+type agentChatOnlyProvider struct {
+	*agentTestProvider
+}
+
+func (p *agentChatOnlyProvider) Capabilities() ProviderCapabilities {
+	return ProviderCapabilities{SupportsChatCompletions: true}
+}
+
 func TestAgentLoop_NoToolCalls(t *testing.T) {
 	t.Parallel()
 
@@ -99,6 +156,77 @@ func TestAgentLoop_OnContentFiresForFinalResponse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "final content", resp.Content)
 	assert.Equal(t, []string{"final content"}, chunks)
+}
+
+func TestAgentLoop_OnStreamChunkReceivesDeltas(t *testing.T) {
+	t.Parallel()
+
+	provider := &agentStreamTestProvider{
+		chunks: []Chunk{
+			{Content: "hel", Model: "test-model"},
+			{Content: "lo", Model: "test-model"},
+			{Done: true, Model: "test-model", StopReason: StopEndTurn},
+		},
+	}
+
+	reg := NewRegistry()
+	reg.Register(provider)
+
+	var deltas []string
+
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "test-model",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		OnStreamChunk: func(chunk Chunk) {
+			if chunk.Content != "" {
+				deltas = append(deltas, chunk.Content)
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "hello", resp.Content)
+	assert.Equal(t, []string{"hel", "lo"}, deltas)
+	assert.Equal(t, 1, provider.streamCalls)
+	require.Len(t, provider.seenMessages, 1)
+	assert.Equal(t, "hi", provider.seenMessages[0][0].Content)
+}
+
+func TestAgentLoop_OnStreamChunkFallsBackToBufferedWhenRoleLacksStreaming(t *testing.T) {
+	t.Parallel()
+
+	provider := &agentChatOnlyProvider{
+		agentTestProvider: &agentTestProvider{
+			responses: []*Response{
+				{Content: "buffered", Model: "test-model", StopReason: StopEndTurn},
+			},
+		},
+	}
+
+	reg := NewRegistry()
+	reg.Register(provider)
+	require.NoError(t, reg.SetModelRole("writer", ModelRole{
+		Preferred: "test/test-model",
+	}))
+
+	var deltas []string
+
+	resp, _, err := AgentLoop(context.Background(), reg, CompleteParams{
+		Model:    "writer",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil, nil, AgentLoopConfig{
+		OnStreamChunk: func(chunk Chunk) {
+			if chunk.Content != "" {
+				deltas = append(deltas, chunk.Content)
+			}
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "buffered", resp.Content)
+	assert.Empty(t, deltas)
+	assert.Equal(t, 1, provider.calls)
 }
 
 func TestAgentLoop_ToolCallThenFinalResponse(t *testing.T) {
