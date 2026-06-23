@@ -36,10 +36,15 @@ func TestPackageContracts_AreDocumentedAndWellFormed(t *testing.T) {
 		assert.Contains(t, docs, shortPackagePath(contract.ImportPath))
 
 		switch contract.Stability {
-		case sdk.StabilityStable, sdk.StabilityExperimental:
+		case sdk.StabilityStable:
+			assert.NotEmpty(t, contract.PrimaryIdentifiers, "stable package %s should publish primary identifiers", contract.ImportPath)
+		case sdk.StabilityExperimental:
+			assert.Empty(t, contract.PrimaryIdentifiers, "experimental package %s should not publish stable primary identifiers", contract.ImportPath)
 		default:
 			require.Failf(t, "unknown stability", "contract %s has stability %q", contract.ImportPath, contract.Stability)
 		}
+
+		assertNoDuplicateStrings(t, contract.ImportPath+" primary identifiers", contract.PrimaryIdentifiers)
 
 		if _, ok := seen[contract.ImportPath]; ok {
 			require.Failf(t, "duplicate package contract", "package %s appears more than once", contract.ImportPath)
@@ -285,6 +290,19 @@ func documentedExampleDirs() []string {
 		"memory-search",
 		"plugin-execution",
 		"worktree-session",
+	}
+}
+
+func assertNoDuplicateStrings(t *testing.T, label string, values []string) {
+	t.Helper()
+
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			require.Failf(t, "duplicate value", "%s contains duplicate %q", label, value)
+		}
+
+		seen[value] = struct{}{}
 	}
 }
 
