@@ -50,10 +50,16 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 	for _, privateDefault := range []string{
 		".atteler/sessions/",
 		".atteler/runs/",
+		".atteler/research/",
 		".atteler/worktrees/",
 		".atteler/tasks.json",
 		".atteler/eval-report*.json",
+		".atteler/codeintel-index.json",
 		".atteler/agent-memory.json",
+		".atteler/fixtures/once.json",
+		".atteler/mcp.yaml",
+		".atteler/plugins/",
+		".atteler/incident.md",
 	} {
 		assert.Contains(t, readme, privateDefault)
 		assert.Contains(t, policy, privateDefault)
@@ -82,12 +88,18 @@ func TestAttelerArtifactPolicy_GitIgnoreResolution(t *testing.T) {
 		".atteler/tasks.json",
 		".atteler/sessions/session.json",
 		".atteler/runs/research/run.json",
+		".atteler/research/plugin-sandboxing/tasks.generated.yaml",
 		".atteler/worktrees/session-1",
 		".atteler/eval-report.json",
+		".atteler/codeintel-index.json",
 		".atteler/vector-index.json",
 		".atteler/agent-memory.json",
 		".atteler/fixtures/once.json",
+		".atteler/fixtures/readme-summary.txt",
 		".atteler/evals/report.json",
+		".atteler/mcp.yaml",
+		".atteler/plugins/rtk/manifest.yaml",
+		".atteler/incident.md",
 		".atteler/skills/generated/foo/SKILL.md",
 	} {
 		assert.True(t, gitCheckIgnored(t, path), "%s should stay ignored/private", path)
