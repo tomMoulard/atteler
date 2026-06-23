@@ -2,9 +2,13 @@ package sdk_test
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -112,6 +116,15 @@ func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
 	assert.Contains(t, docs, "deprecation window, migration path")
 }
 
+func TestSDKDocsMentionExportedFacadeIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	docs := readRepoFile(t, "docs", "sdk.md")
+	for _, name := range exportedSDKIdentifiers(t) {
+		assert.Contains(t, docs, "`"+name+"`", "docs/sdk.md should mention exported pkg/sdk identifier %s", name)
+	}
+}
+
 func TestExamplesDirectory_CoversDocumentedSDKWorkflows(t *testing.T) {
 	t.Parallel()
 
@@ -159,6 +172,49 @@ func readRepoFile(t *testing.T, parts ...string) string {
 	require.NoError(t, err)
 
 	return string(data)
+}
+
+func exportedSDKIdentifiers(t *testing.T) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(repoRoot(t), "pkg", "sdk", "sdk.go"), nil, 0)
+	require.NoError(t, err)
+
+	seen := make(map[string]struct{})
+
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				switch spec := spec.(type) {
+				case *ast.TypeSpec:
+					if ast.IsExported(spec.Name.Name) {
+						seen[spec.Name.Name] = struct{}{}
+					}
+				case *ast.ValueSpec:
+					for _, name := range spec.Names {
+						if ast.IsExported(name.Name) {
+							seen[name.Name] = struct{}{}
+						}
+					}
+				}
+			}
+		case *ast.FuncDecl:
+			if ast.IsExported(decl.Name.Name) {
+				seen[decl.Name.Name] = struct{}{}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
 }
 
 func repoRoot(t *testing.T) string {

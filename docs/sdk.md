@@ -71,6 +71,15 @@ Before tagging a release that changes exported SDK code, maintainers should:
 | `pkg/permission` | `Policy`, `Request`, `Operation`, `Decision`, context helpers | Central side-effect policy gates and audit metadata. |
 | `pkg/events` | `Event`, `Runner`, hook payload contracts | Lifecycle event subscriptions and hook dispatch. |
 
+The `pkg/sdk` facade currently exports these source-compatible identifiers:
+`APIContract`, `APIContractSchemaVersion`, `AttachNewWorktree`, `AttachWorktree`,
+`BuildMemoryIndex`, `CompatibilityPolicy`, `Contract`, `MemoryIndexOptions`,
+`NewProviderRegistry`, `NewReviewRun`, `NewSession`, `OneShotChatOptions`,
+`OneShotChatResult`, `PackageContract`, `PackageContracts`,
+`PackagesByStability`, `PluginRunOptions`, `ReviewRun`, `ReviewRunOptions`,
+`RunOneShotChat`, `RunPlugin`, `SaveSession`, `SearchMemory`, `SessionOptions`,
+`Stability`, `StabilityExperimental`, `StabilityStable`, and `ValidateReport`.
+
 ## Experimental packages
 
 These packages are useful for advanced integrations but are not yet covered by
