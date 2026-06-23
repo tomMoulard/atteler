@@ -80,7 +80,7 @@ func TestRunOneShotChat_PersistsSession(t *testing.T) {
 	require.NoError(t, err)
 
 	store := session.NewStore(t.TempDir())
-	result, err := sdk.RunOneShotChat(context.Background(), sdk.OneShotChatOptions{
+	result, err := sdk.RunOneShotChat(t.Context(), sdk.OneShotChatOptions{
 		Registry:    registry,
 		Store:       store,
 		Model:       "fake-model",
@@ -116,7 +116,7 @@ func TestRunOneShotChat_PreservesUnsavedSessionHistory(t *testing.T) {
 		Messages:     messages,
 	}
 
-	result, err := sdk.RunOneShotChat(context.Background(), sdk.OneShotChatOptions{
+	result, err := sdk.RunOneShotChat(t.Context(), sdk.OneShotChatOptions{
 		Registry: registry,
 		Session:  input,
 		Prompt:   "next",

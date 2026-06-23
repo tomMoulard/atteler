@@ -1,7 +1,6 @@
 package sdk_test
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +21,7 @@ func ExampleRunOneShotChat() {
 		panic(err)
 	}
 
-	result, err := sdk.RunOneShotChat(context.Background(), sdk.OneShotChatOptions{
+	result, err := sdk.RunOneShotChat(exampleContext{}, sdk.OneShotChatOptions{
 		Registry: registry,
 		Model:    "fake-model",
 		Prompt:   "hello SDK",
@@ -150,7 +149,7 @@ func ExampleRunPlugin() {
 	}
 	policy := plugin.AcceptManifestPolicy(manifest)
 
-	result, err := sdk.RunPlugin(context.Background(), sdk.PluginRunOptions{
+	result, err := sdk.RunPlugin(exampleContext{}, sdk.PluginRunOptions{
 		Policy:     &policy,
 		Manifest:   manifest,
 		Root:       root,
@@ -214,3 +213,15 @@ func writeExampleScript(path, content string) {
 		panic(err)
 	}
 }
+
+// exampleContext keeps package examples free of process-root context creation;
+// real applications should pass their request or command context.
+type exampleContext struct{}
+
+func (exampleContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (exampleContext) Done() <-chan struct{} { return nil }
+
+func (exampleContext) Err() error { return nil }
+
+func (exampleContext) Value(_ any) any { return nil }
