@@ -403,6 +403,49 @@ command output, tests, logs, or prior session artifacts. This improves
 reliability and makes research easier to audit, but evidence is not mandatory
 for every statement.
 
+## Local-first issue watch
+
+Watch GitHub issues by repository and label, then prepare reviewable local
+implementation attempts without publishing anything:
+
+```sh
+atteler issue watch --github owner/repo --label atteler-agent --once
+atteler issue watch --github owner/repo --label ready-for-ai --dry-run
+atteler issue watch --github owner/repo --label atteler-agent \
+  --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' \
+  --validation-command "go test ./..." \
+  --once
+atteler issue list-candidates --github owner/repo --label ready-for-ai
+atteler issue run 232 --github owner/repo
+```
+
+`issue list-candidates` is a dry-run alias for reviewing the same eligible set; `issue run <issue-ref>` prepares one issue directly. `issue watch` is local-first by default. It may read GitHub issue metadata,
+create a local git worktree, and write artifacts under
+`.atteler/runs/issues/<issue-id>/<run-id>/`; it does not push branches, open
+pull requests, or post tracker comments. Duplicate runs are avoided with
+`.atteler/issue-watch/state.json`.
+
+When `--command` is provided, issue watch runs that local command inside each
+isolated worktree. Any `--validation-command` values run afterward in the same
+worktree, and their bounded stdout/stderr plus the refreshed git diff are stored
+in the run artifacts. These command hooks remain local-only: direct network and
+credential-access operations are denied, and publishing still requires a
+separate explicit workflow. Commands receive environment variables pointing at
+the generated context, including `ATTELER_ISSUE_WATCH_PLAN`,
+`ATTELER_ISSUE_WATCH_ISSUE_JSON`, `ATTELER_ISSUE_WATCH_RUN_DIR`, and
+`ATTELER_ISSUE_WATCH_PATCH`. Nested `atteler issue implement --open-pr` calls
+are refused while running under issue watch; publish separately after reviewing
+the local artifacts. Nested Atteler bash tools also deny shell-network commands
+such as `curl`, `gh`, or `git push` while `ATTELER_ISSUE_WATCH=1`.
+
+Each prepared run includes `issue.json`, `plan.md`, `implementation.md`,
+`validation.log`, `patch.diff`, and `run.json`. The plan calls out discovered
+repository/harness instructions such as `AGENTS.md`, `CLAUDE.md`,
+`.cursor/rules/*`, `.cursorrules`, `CODEX.md`, `GEMINI.md`, and GitHub Copilot
+instructions when present. Reports should include evidence such as changed
+files, tests run, command output, validation status, and issue metadata whenever
+available.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch
@@ -1536,15 +1579,23 @@ Examples:
 
 ## Issue implementation
 
-Run the autonomous Symphony issue-to-PR agent with explicit verification gates.
+Implement individual issues or prepare local-first issue-watch runs without publishing.
 
 Commands:
 - `implement <issue-ref>`: implement one tracker issue and optionally open a verified pull request (dispatch: `issue-implement`)
+- `watch`: watch labeled GitHub issues and prepare local-only worktree run artifacts (dispatch: `issue-watch`)
+- `run <issue-ref>`: prepare one GitHub issue as a local-only issue-watch run (dispatch: `issue-watch`)
+- `list-candidates`: list issue-watch candidates without creating local worktrees or artifacts (dispatch: `issue-watch`)
 
 Examples:
 - `atteler issue implement GH-218 --open-pr`
 - `atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`
 - `atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint`
+- `atteler issue watch --github owner/repo --label atteler-agent --once`
+- `atteler issue watch --github owner/repo --label ready-for-ai --dry-run`
+- `atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`
+- `atteler issue list-candidates --github owner/repo --label ready-for-ai`
+- `atteler issue run 232 --github owner/repo`
 
 ## Memory & Retrieval
 
@@ -2351,6 +2402,19 @@ Commands:
   - Outputs: `text`
   - Fixtures:
     - `legacy-flag`: `atteler --issue-implement value` -> `issue-implement`
+- `issue-watch` (providerless): watch labeled GitHub issues and prepare local-only worktree run artifacts
+  - Input: `issueWatchCommandInput`
+  - Input fields: `GitHub`, `GitHubEndpoint`, `GitHubTokenSet`, `RunRef`, `Command`, `Labels`, `ValidationCommands`, `IntervalSeconds`, `CommandTimeoutSeconds`, `Once`, `DryRun`
+  - Flags: `--issue-watch`, `--issue-watch-github`, `--issue-watch-label`, `--issue-watch-once`, `--issue-watch-dry-run`, `--issue-watch-github-api-url`, `--issue-watch-github-token`, `--issue-watch-run`, `--issue-watch-interval-seconds`, `--issue-watch-command`, `--issue-watch-validation-command`, `--issue-watch-command-timeout-seconds`
+  - Examples: `atteler issue watch --github owner/repo --label atteler-agent --once`, `atteler issue watch --github owner/repo --label ready-for-ai --dry-run`, `atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`, `atteler issue list-candidates --github owner/repo --label ready-for-ai`, `atteler issue run 232 --github owner/repo`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `git-read`, `git-write`, `network`, `process-execute`, `worktree-write`, `stdout`
+  - Outputs: `text`
+  - Fixtures:
+    - `legacy-flags`: `atteler --issue-watch --issue-watch-github owner/repo --issue-watch-label atteler-agent --issue-watch-dry-run` -> `issue-watch`
+    - `legacy-local-command`: `atteler --issue-watch --issue-watch-github owner/repo --issue-watch-label atteler-agent --issue-watch-command printf ok --issue-watch-validation-command go test ./... --issue-watch-once` -> `issue-watch`
+    - `legacy-run`: `atteler --issue-watch-run 232 --issue-watch-github owner/repo` -> `issue-watch`
 - `mcp-invoke` (providerless): invoke an MCP tool or JSON-RPC method
   - Input: `mcpInvokeCommandInput`
   - Input fields: `ManifestPath`, `ServerName`, `Method`, `ParamsJSON`, `ToolName`, `ToolArgsJSON`, `TimeoutSeconds`
@@ -5287,6 +5351,134 @@ Implement one tracker issue through Symphony and exit
 
 ```sh
 atteler --issue-implement <value>
+```
+
+### `--issue-watch`
+
+Watch GitHub issues and prepare local-only implementation runs
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch
+```
+
+### `--issue-watch-command`
+
+Local implementation command to run inside each issue-watch worktree
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-command <value>
+```
+
+### `--issue-watch-command-timeout-seconds`
+
+Seconds before each issue-watch local command times out
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-command-timeout-seconds <value>
+```
+
+### `--issue-watch-dry-run`
+
+List issue-watch candidates without creating worktrees, artifacts, or state
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch-dry-run
+```
+
+### `--issue-watch-github`
+
+GitHub repository owner/name for --issue-watch
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github <value>
+```
+
+### `--issue-watch-github-api-url`
+
+GitHub API endpoint for --issue-watch; defaults to https://api.github.com
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github-api-url <value>
+```
+
+### `--issue-watch-github-token`
+
+GitHub token for --issue-watch; defaults to GITHUB_TOKEN or GH_TOKEN when present
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github-token <value>
+```
+
+### `--issue-watch-interval-seconds`
+
+Seconds between --issue-watch polling iterations
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-interval-seconds <value>
+```
+
+### `--issue-watch-label`
+
+GitHub issue label for --issue-watch (repeatable or comma-separated)
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-label <value>
+```
+
+### `--issue-watch-once`
+
+Process one issue-watch polling iteration and exit
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch-once
+```
+
+### `--issue-watch-run`
+
+GitHub issue number or reference to prepare through --issue-watch
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-run <value>
+```
+
+### `--issue-watch-validation-command`
+
+Validation command to run inside each issue-watch worktree after --issue-watch-command (repeatable)
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-validation-command <value>
 ```
 
 ### `--issue-workflow`
@@ -9098,6 +9290,38 @@ Use `--update-docs` and `--update-changelog` to add explicit worker
 instructions for documentation or changelog edits when they are relevant; these
 flags do not force blind documentation changes when the issue does not need
 them.
+
+For a safer background queue entry point that only prepares local artifacts and
+worktrees, use issue watch:
+
+```sh
+atteler issue watch --github owner/repo --label atteler-agent --once
+atteler issue watch --github owner/repo --label ready-for-ai --dry-run
+atteler issue watch --github owner/repo --label atteler-agent \
+  --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' \
+  --validation-command "go test ./..." \
+  --once
+atteler issue list-candidates --github owner/repo --label ready-for-ai
+atteler issue run 232 --github owner/repo
+```
+
+`issue list-candidates` uses the same filters without local writes, and `issue run <issue-ref>` prepares one issue directly. `issue watch` discovers open GitHub issues with the requested label, avoids
+duplicates through `.atteler/issue-watch/state.json`, creates isolated local git
+worktrees, and writes review artifacts under `.atteler/runs/issues/`. It does
+not push branches, open pull requests, or post issue comments.
+
+If `--command` is present, that local implementation command runs inside the
+prepared worktree. Repeated `--validation-command` values run afterward, and the
+captured command output, validation status, changed-file list, and refreshed
+`patch.diff` stay in the local run directory. Direct network and credential
+access from those command hooks is denied so the watcher remains local-only by
+default. Commands receive artifact path environment variables such as
+`ATTELER_ISSUE_WATCH_PLAN`, `ATTELER_ISSUE_WATCH_ISSUE_JSON`,
+`ATTELER_ISSUE_WATCH_RUN_DIR`, and `ATTELER_ISSUE_WATCH_PATCH`. Nested
+`atteler issue implement --open-pr` calls are refused while running under issue
+watch so publication remains a separate explicit workflow. Nested Atteler bash
+tools also deny shell-network commands such as `curl`, `gh`, or `git push`
+while `ATTELER_ISSUE_WATCH=1`.
 
 If the one-shot worker fails after preparing a workspace, or completes without
 leaving publishable changes, `--open-pr` uses the same draft fallback control

@@ -124,6 +124,8 @@ func initCLIFlagValues(opts *cliOptions) {
 	opts.promptCompleteLimit = positiveIntFlag{name: "prompt-complete-limit"}
 	opts.watchLargeFileBytes = positiveIntFlag{name: "watch-large-file-bytes"}
 	opts.watchIntervalSeconds = positiveIntFlag{name: "watch-interval-seconds"}
+	opts.issueWatchIntervalSeconds = positiveIntFlag{name: "issue-watch-interval-seconds"}
+	opts.issueWatchCommandTimeout = positiveIntFlag{name: "issue-watch-command-timeout-seconds"}
 	opts.watchMaxIterations = positiveIntFlag{name: "watch-max-iterations"}
 	opts.skillMaxSteps = positiveIntFlag{name: "skill-max-steps"}
 	opts.skillMinOccurrences = positiveIntFlag{name: "skill-min-occurrences"}

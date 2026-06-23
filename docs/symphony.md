@@ -39,6 +39,38 @@ instructions for documentation or changelog edits when they are relevant; these
 flags do not force blind documentation changes when the issue does not need
 them.
 
+For a safer background queue entry point that only prepares local artifacts and
+worktrees, use issue watch:
+
+```sh
+atteler issue watch --github owner/repo --label atteler-agent --once
+atteler issue watch --github owner/repo --label ready-for-ai --dry-run
+atteler issue watch --github owner/repo --label atteler-agent \
+  --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' \
+  --validation-command "go test ./..." \
+  --once
+atteler issue list-candidates --github owner/repo --label ready-for-ai
+atteler issue run 232 --github owner/repo
+```
+
+`issue list-candidates` uses the same filters without local writes, and `issue run <issue-ref>` prepares one issue directly. `issue watch` discovers open GitHub issues with the requested label, avoids
+duplicates through `.atteler/issue-watch/state.json`, creates isolated local git
+worktrees, and writes review artifacts under `.atteler/runs/issues/`. It does
+not push branches, open pull requests, or post issue comments.
+
+If `--command` is present, that local implementation command runs inside the
+prepared worktree. Repeated `--validation-command` values run afterward, and the
+captured command output, validation status, changed-file list, and refreshed
+`patch.diff` stay in the local run directory. Direct network and credential
+access from those command hooks is denied so the watcher remains local-only by
+default. Commands receive artifact path environment variables such as
+`ATTELER_ISSUE_WATCH_PLAN`, `ATTELER_ISSUE_WATCH_ISSUE_JSON`,
+`ATTELER_ISSUE_WATCH_RUN_DIR`, and `ATTELER_ISSUE_WATCH_PATCH`. Nested
+`atteler issue implement --open-pr` calls are refused while running under issue
+watch so publication remains a separate explicit workflow. Nested Atteler bash
+tools also deny shell-network commands such as `curl`, `gh`, or `git push`
+while `ATTELER_ISSUE_WATCH=1`.
+
 If the one-shot worker fails after preparing a workspace, or completes without
 leaving publishable changes, `--open-pr` uses the same draft fallback control
 (`publish.draft_on_failed_validation`, enabled by default in resolved config)

@@ -234,6 +234,49 @@ command output, tests, logs, or prior session artifacts. This improves
 reliability and makes research easier to audit, but evidence is not mandatory
 for every statement.
 
+## Local-first issue watch
+
+Watch GitHub issues by repository and label, then prepare reviewable local
+implementation attempts without publishing anything:
+
+```sh
+atteler issue watch --github owner/repo --label atteler-agent --once
+atteler issue watch --github owner/repo --label ready-for-ai --dry-run
+atteler issue watch --github owner/repo --label atteler-agent \
+  --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' \
+  --validation-command "go test ./..." \
+  --once
+atteler issue list-candidates --github owner/repo --label ready-for-ai
+atteler issue run 232 --github owner/repo
+```
+
+`issue list-candidates` is a dry-run alias for reviewing the same eligible set; `issue run <issue-ref>` prepares one issue directly. `issue watch` is local-first by default. It may read GitHub issue metadata,
+create a local git worktree, and write artifacts under
+`.atteler/runs/issues/<issue-id>/<run-id>/`; it does not push branches, open
+pull requests, or post tracker comments. Duplicate runs are avoided with
+`.atteler/issue-watch/state.json`.
+
+When `--command` is provided, issue watch runs that local command inside each
+isolated worktree. Any `--validation-command` values run afterward in the same
+worktree, and their bounded stdout/stderr plus the refreshed git diff are stored
+in the run artifacts. These command hooks remain local-only: direct network and
+credential-access operations are denied, and publishing still requires a
+separate explicit workflow. Commands receive environment variables pointing at
+the generated context, including `ATTELER_ISSUE_WATCH_PLAN`,
+`ATTELER_ISSUE_WATCH_ISSUE_JSON`, `ATTELER_ISSUE_WATCH_RUN_DIR`, and
+`ATTELER_ISSUE_WATCH_PATCH`. Nested `atteler issue implement --open-pr` calls
+are refused while running under issue watch; publish separately after reviewing
+the local artifacts. Nested Atteler bash tools also deny shell-network commands
+such as `curl`, `gh`, or `git push` while `ATTELER_ISSUE_WATCH=1`.
+
+Each prepared run includes `issue.json`, `plan.md`, `implementation.md`,
+`validation.log`, `patch.diff`, and `run.json`. The plan calls out discovered
+repository/harness instructions such as `AGENTS.md`, `CLAUDE.md`,
+`.cursor/rules/*`, `.cursorrules`, `CODEX.md`, `GEMINI.md`, and GitHub Copilot
+instructions when present. Reports should include evidence such as changed
+files, tests run, command output, validation status, and issue metadata whenever
+available.
+
 ## Continuous watch and incidents
 
 Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch

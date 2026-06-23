@@ -594,7 +594,9 @@ func (c *GitHubClient) graphql(ctx context.Context, query string, variables map[
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	if token := strings.TrimSpace(c.cfg.APIKey); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 
@@ -686,7 +688,7 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 		"github "+method+" "+path,
 		"atteler.tracker.github",
 		endpoint,
-		githubTrackerOperationKinds(method)...,
+		githubTrackerOperationKinds(method, strings.TrimSpace(c.cfg.APIKey) != "")...,
 	); err != nil {
 		return err
 	}
@@ -707,7 +709,9 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, in any, out 
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	if token := strings.TrimSpace(c.cfg.APIKey); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -774,10 +778,10 @@ func authorizeTrackerPermission(
 	return &permission.Error{Decision: decision}
 }
 
-func githubTrackerOperationKinds(method string) []permission.OperationKind {
-	kinds := []permission.OperationKind{
-		permission.OperationNetwork,
-		permission.OperationCredentialAccess,
+func githubTrackerOperationKinds(method string, authenticated bool) []permission.OperationKind {
+	kinds := []permission.OperationKind{permission.OperationNetwork}
+	if authenticated {
+		kinds = append(kinds, permission.OperationCredentialAccess)
 	}
 
 	switch strings.ToUpper(strings.TrimSpace(method)) {

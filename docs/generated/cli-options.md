@@ -2035,6 +2035,134 @@ Implement one tracker issue through Symphony and exit
 atteler --issue-implement <value>
 ```
 
+### `--issue-watch`
+
+Watch GitHub issues and prepare local-only implementation runs
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch
+```
+
+### `--issue-watch-command`
+
+Local implementation command to run inside each issue-watch worktree
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-command <value>
+```
+
+### `--issue-watch-command-timeout-seconds`
+
+Seconds before each issue-watch local command times out
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-command-timeout-seconds <value>
+```
+
+### `--issue-watch-dry-run`
+
+List issue-watch candidates without creating worktrees, artifacts, or state
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch-dry-run
+```
+
+### `--issue-watch-github`
+
+GitHub repository owner/name for --issue-watch
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github <value>
+```
+
+### `--issue-watch-github-api-url`
+
+GitHub API endpoint for --issue-watch; defaults to https://api.github.com
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github-api-url <value>
+```
+
+### `--issue-watch-github-token`
+
+GitHub token for --issue-watch; defaults to GITHUB_TOKEN or GH_TOKEN when present
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-github-token <value>
+```
+
+### `--issue-watch-interval-seconds`
+
+Seconds between --issue-watch polling iterations
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-interval-seconds <value>
+```
+
+### `--issue-watch-label`
+
+GitHub issue label for --issue-watch (repeatable or comma-separated)
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-label <value>
+```
+
+### `--issue-watch-once`
+
+Process one issue-watch polling iteration and exit
+
+- **Type:** bool
+- **Default:** `false`
+
+```sh
+atteler --issue-watch-once
+```
+
+### `--issue-watch-run`
+
+GitHub issue number or reference to prepare through --issue-watch
+
+- **Type:** string
+- **Default:** `""`
+
+```sh
+atteler --issue-watch-run <value>
+```
+
+### `--issue-watch-validation-command`
+
+Validation command to run inside each issue-watch worktree after --issue-watch-command (repeatable)
+
+- **Type:** value
+
+```sh
+atteler --issue-watch-validation-command <value>
+```
+
 ### `--issue-workflow`
 
 WORKFLOW.md path for --issue-implement; defaults to ./WORKFLOW.md

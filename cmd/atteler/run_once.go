@@ -2412,6 +2412,7 @@ func runOnceBashCommand(
 		Dir:            cwd,
 		Timeout:        5 * time.Minute,
 		MaxOutputBytes: agentLoopToolOutputLimit(ctx),
+		Policy:         issueWatchRunOnceShellPolicy(),
 		Audit:          audit,
 		Permission:     permissionPolicy,
 		StartCallback: func() {
@@ -2443,4 +2444,15 @@ func runOnceBashCommand(
 	}
 
 	return result, nil
+}
+
+func issueWatchRunOnceShellPolicy() *attshell.Policy {
+	if !issueWatchLocalOnlyEnvironment() {
+		return nil
+	}
+
+	policy := attshell.DefaultPolicy()
+	policy.DenyNetwork = true
+
+	return &policy
 }

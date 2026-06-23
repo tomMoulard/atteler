@@ -164,15 +164,23 @@ Examples:
 
 ## Issue implementation
 
-Run the autonomous Symphony issue-to-PR agent with explicit verification gates.
+Implement individual issues or prepare local-first issue-watch runs without publishing.
 
 Commands:
 - `implement <issue-ref>`: implement one tracker issue and optionally open a verified pull request (dispatch: `issue-implement`)
+- `watch`: watch labeled GitHub issues and prepare local-only worktree run artifacts (dispatch: `issue-watch`)
+- `run <issue-ref>`: prepare one GitHub issue as a local-only issue-watch run (dispatch: `issue-watch`)
+- `list-candidates`: list issue-watch candidates without creating local worktrees or artifacts (dispatch: `issue-watch`)
 
 Examples:
 - `atteler issue implement GH-218 --open-pr`
 - `atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`
 - `atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint`
+- `atteler issue watch --github owner/repo --label atteler-agent --once`
+- `atteler issue watch --github owner/repo --label ready-for-ai --dry-run`
+- `atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`
+- `atteler issue list-candidates --github owner/repo --label ready-for-ai`
+- `atteler issue run 232 --github owner/repo`
 
 ## Memory & Retrieval
 
@@ -979,6 +987,19 @@ Commands:
   - Outputs: `text`
   - Fixtures:
     - `legacy-flag`: `atteler --issue-implement value` -> `issue-implement`
+- `issue-watch` (providerless): watch labeled GitHub issues and prepare local-only worktree run artifacts
+  - Input: `issueWatchCommandInput`
+  - Input fields: `GitHub`, `GitHubEndpoint`, `GitHubTokenSet`, `RunRef`, `Command`, `Labels`, `ValidationCommands`, `IntervalSeconds`, `CommandTimeoutSeconds`, `Once`, `DryRun`
+  - Flags: `--issue-watch`, `--issue-watch-github`, `--issue-watch-label`, `--issue-watch-once`, `--issue-watch-dry-run`, `--issue-watch-github-api-url`, `--issue-watch-github-token`, `--issue-watch-run`, `--issue-watch-interval-seconds`, `--issue-watch-command`, `--issue-watch-validation-command`, `--issue-watch-command-timeout-seconds`
+  - Examples: `atteler issue watch --github owner/repo --label atteler-agent --once`, `atteler issue watch --github owner/repo --label ready-for-ai --dry-run`, `atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`, `atteler issue list-candidates --github owner/repo --label ready-for-ai`, `atteler issue run 232 --github owner/repo`
+  - Conflicts:
+    - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
+  - Side effects: `filesystem-read`, `filesystem-write`, `git-read`, `git-write`, `network`, `process-execute`, `worktree-write`, `stdout`
+  - Outputs: `text`
+  - Fixtures:
+    - `legacy-flags`: `atteler --issue-watch --issue-watch-github owner/repo --issue-watch-label atteler-agent --issue-watch-dry-run` -> `issue-watch`
+    - `legacy-local-command`: `atteler --issue-watch --issue-watch-github owner/repo --issue-watch-label atteler-agent --issue-watch-command printf ok --issue-watch-validation-command go test ./... --issue-watch-once` -> `issue-watch`
+    - `legacy-run`: `atteler --issue-watch-run 232 --issue-watch-github owner/repo` -> `issue-watch`
 - `mcp-invoke` (providerless): invoke an MCP tool or JSON-RPC method
   - Input: `mcpInvokeCommandInput`
   - Input fields: `ManifestPath`, `ServerName`, `Method`, `ParamsJSON`, `ToolName`, `ToolArgsJSON`, `TimeoutSeconds`

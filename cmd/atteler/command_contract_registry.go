@@ -478,6 +478,19 @@ func commandContractsByName() map[string]commandContract {
 			withInputType("issueImplementCommandInput"),
 			withExamples("atteler issue implement GH-218 --open-pr --run-tests --run-lint"),
 		),
+		"issue-watch": commandContractFor(
+			"watch labeled GitHub issues and prepare local-only worktree run artifacts",
+			[]string{"--issue-watch", "--issue-watch-github", "--issue-watch-label", "--issue-watch-once", "--issue-watch-dry-run", "--issue-watch-github-api-url", "--issue-watch-github-token", "--issue-watch-run", "--issue-watch-interval-seconds", "--issue-watch-command", "--issue-watch-validation-command", "--issue-watch-command-timeout-seconds"},
+			[]string{commandEffectFilesystemRead, commandEffectFilesystemWrite, commandEffectGitRead, commandEffectGitWrite, commandEffectNetwork, commandEffectProcessExecute, commandEffectWorktreeWrite, commandEffectUserOutput},
+			[]string{commandOutputText},
+			withInputType("issueWatchCommandInput"),
+			withExamples("atteler issue watch --github owner/repo --label atteler-agent --once", "atteler issue watch --github owner/repo --label ready-for-ai --dry-run", "atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once \"Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish.\"' --validation-command \"go test ./...\" --once", "atteler issue list-candidates --github owner/repo --label ready-for-ai", "atteler issue run 232 --github owner/repo"),
+			withFixtures(
+				commandFixture{Name: "legacy-flags", Args: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "atteler-agent", "--issue-watch-dry-run"}},
+				commandFixture{Name: "legacy-local-command", Args: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "atteler-agent", "--issue-watch-command", "printf ok", "--issue-watch-validation-command", "go test ./...", "--issue-watch-once"}},
+				commandFixture{Name: "legacy-run", Args: []string{"--issue-watch-run", "232", "--issue-watch-github", "owner/repo"}},
+			),
+		),
 		"plan-agents-providerless": commandContractFor(
 			"preview configured agents for a prompt",
 			[]string{"--plan-agents", "--plan-agent", "--plan-max-agents"},

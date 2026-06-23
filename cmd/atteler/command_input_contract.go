@@ -241,6 +241,21 @@ type issueImplementCommandInput struct {
 	UpdateChangelog bool
 }
 
+//nolint:govet // Field order mirrors the user-facing issue-watch flags.
+type issueWatchCommandInput struct {
+	GitHub                string
+	GitHubEndpoint        string
+	GitHubTokenSet        bool
+	RunRef                string
+	Command               string
+	Labels                []string
+	ValidationCommands    []string
+	IntervalSeconds       int
+	CommandTimeoutSeconds int
+	Once                  bool
+	DryRun                bool
+}
+
 type headlessCommandInput struct {
 	StatusID     string
 	CancelID     string
@@ -515,6 +530,7 @@ func commandInputBuildersByType() map[string]commandInputBuilder {
 		"initConfigCommandInput":              func(opts cliOptions) any { return initConfigCommandInputFromOptions(opts) },
 		"initRTKPluginCommandInput":           func(opts cliOptions) any { return initRTKPluginCommandInputFromOptions(opts) },
 		"issueImplementCommandInput":          func(opts cliOptions) any { return issueImplementCommandInputFromOptions(opts) },
+		"issueWatchCommandInput":              func(opts cliOptions) any { return issueWatchCommandInputFromOptions(opts) },
 		"listAgentsCommandInput":              func(opts cliOptions) any { return listAgentsCommandInputFromOptions(opts) },
 		"listConfigPathsCommandInput":         func(opts cliOptions) any { return listConfigPathsCommandInputFromOptions(opts) },
 		"listHookEventsCommandInput":          func(opts cliOptions) any { return listHookEventsCommandInputFromOptions(opts) },
@@ -834,6 +850,22 @@ func issueImplementCommandInputFromOptions(opts cliOptions) issueImplementComman
 		RunLint:         opts.issueRunLint,
 		UpdateDocs:      opts.issueUpdateDocs,
 		UpdateChangelog: opts.issueUpdateChangelog,
+	}
+}
+
+func issueWatchCommandInputFromOptions(opts cliOptions) issueWatchCommandInput {
+	return issueWatchCommandInput{
+		GitHub:                opts.issueWatchGitHub,
+		GitHubEndpoint:        opts.issueWatchGitHubEndpoint,
+		GitHubTokenSet:        strings.TrimSpace(opts.issueWatchGitHubToken) != "",
+		RunRef:                opts.issueWatchRunRef,
+		Command:               opts.issueWatchCommand,
+		Labels:                []string(opts.issueWatchLabels),
+		ValidationCommands:    []string(opts.issueWatchValidationCommands),
+		IntervalSeconds:       opts.issueWatchIntervalSeconds.value,
+		CommandTimeoutSeconds: opts.issueWatchCommandTimeout.value,
+		Once:                  opts.issueWatchOnce,
+		DryRun:                opts.issueWatchDryRun,
 	}
 }
 

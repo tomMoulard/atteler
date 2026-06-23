@@ -98,6 +98,55 @@ func TestGitHubClient_PermissionPolicyDeniesNetworkBeforeRequest(t *testing.T) {
 	assert.Contains(t, err.Error(), "permission.network.deny")
 }
 
+func TestGitHubClient_UnauthenticatedFetchDoesNotRequireCredentialAccess(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("Authorization"))
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, testGitHubIssuesPath, r.URL.Path)
+		writeTestResponse(t, w, `[]`)
+	}))
+	t.Cleanup(server.Close)
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint:     server.URL,
+		Owner:        "owner",
+		Repo:         "repo",
+		ActiveStates: []string{"open"},
+	})
+
+	issues, err := client.FetchCandidateIssues(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, issues)
+}
+
+func TestGitHubClient_PermissionPolicyDeniesCredentialAccessWhenTokenConfigured(t *testing.T) {
+	t.Parallel()
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationCredentialAccess, permission.ModeDeny)
+	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, t.TempDir())
+
+	client := NewGitHubClient(TrackerConfig{
+		Endpoint:     "http://127.0.0.1:1",
+		APIKey:       "token",
+		Owner:        "owner",
+		Repo:         "repo",
+		ActiveStates: []string{"open"},
+	})
+
+	_, err := client.FetchCandidateIssues(ctx)
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+	assert.Contains(t, err.Error(), "permission.credential_access.deny")
+}
+
 func TestGitHubClient_PermissionPolicyDeniesWriteBeforeCreateIssue(t *testing.T) {
 	t.Parallel()
 

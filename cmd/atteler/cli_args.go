@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
 )
+
+const issueWatchCommandFlagName = "command"
 
 func translateCLIArgs(args []string) cliArgPlan {
 	return translateCLIArgsWithFlagSet(args, flag.CommandLine)
@@ -88,7 +91,7 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 	command, ok := lookupDomainCommand(domain, rest[1])
 	if !ok {
 		if domain.Name == autoresearchDomainName {
-			return translateDomainCommandArgs(prefix, domain, append([]string{rest[0], "run"}, rest[1:]...), fs)
+			return translateDomainCommandArgs(prefix, domain, append([]string{rest[0], runCommandName}, rest[1:]...), fs)
 		}
 
 		// Domain words such as "review", "watch", "session", and "code" are
@@ -108,6 +111,17 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 		return cliArgPlan{Help: true, HelpDomain: rest[0]}
 	}
 
+	if domain.Name == issueCommandName {
+		switch command.Name {
+		case "watch":
+			return translateIssueWatchCommandArgs(prefix, rest[2:], fs, false)
+		case "list-candidates":
+			return translateIssueWatchCommandArgs(prefix, rest[2:], fs, true)
+		case runCommandName:
+			return translateIssueRunCommandArgs(prefix, rest[2:], fs)
+		}
+	}
+
 	if strictUnknownDomainCommand(domain, rest[0]) {
 		if unknownFlag, ok := firstUnknownFlagArg(rest[2:], fs, false); ok {
 			return cliArgPlan{Err: unknownDomainFlagError(domain, rest[0], unknownFlag)}
@@ -121,6 +135,282 @@ func translateDomainCommandArgs(prefix []string, domain cliHelpDomain, rest []st
 	}
 
 	return cliArgPlan{Args: appendCLIArgs(prefix, commandArgsWithFlagSet(command, prefix, rest[2:], fs)...)}
+}
+
+//nolint:cyclop,gocognit,wsl_v5 // Command-specific flag translation keeps --once from colliding with chat once.
+func translateIssueWatchCommandArgs(prefix, tail []string, fs *flag.FlagSet, forceListCandidates bool) cliArgPlan {
+	out := []string{"--issue-watch"}
+
+	for i := 0; i < len(tail); i++ {
+		arg := tail[i]
+		if arg == "--" {
+			if i+1 < len(tail) {
+				return cliArgPlan{Err: fmt.Errorf("issue watch does not accept positional arguments: %q", tail[i+1])}
+			}
+
+			break
+		}
+
+		name, value, hasValue := splitIssueWatchFlag(arg)
+		switch name {
+		case "github":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github", next)
+			i = nextIndex
+		case "label":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-label", next)
+			i = nextIndex
+		case "github-api-url":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github-api-url", next)
+			i = nextIndex
+		case "github-token":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github-token", next)
+			i = nextIndex
+		case "interval-seconds":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-interval-seconds", next)
+			i = nextIndex
+		case issueWatchCommandFlagName:
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-command", next)
+			i = nextIndex
+		case "validation-command":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-validation-command", next)
+			i = nextIndex
+		case "command-timeout-seconds":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-command-timeout-seconds", next)
+			i = nextIndex
+		case onceCommandName:
+			out = appendIssueWatchBoolFlag(out, "--issue-watch-once", value, hasValue)
+		case issueWatchDryRunModeName:
+			out = appendIssueWatchBoolFlag(out, "--issue-watch-dry-run", value, hasValue)
+		default:
+			if strings.HasPrefix(arg, "-") {
+				var ok bool
+				out, i, ok = appendKnownIssueWatchFlag(out, tail, i, fs)
+				if ok {
+					continue
+				}
+
+				return cliArgPlan{Err: fmt.Errorf("unknown issue watch flag %q; run `atteler help issue`", arg)}
+			}
+
+			return cliArgPlan{Err: fmt.Errorf("issue watch does not accept positional arguments: %q", arg)}
+		}
+	}
+
+	if forceListCandidates {
+		out = append(out, "--issue-watch-dry-run", "--issue-watch-once")
+	}
+
+	return cliArgPlan{Args: appendCLIArgs(prefix, out...)}
+}
+
+//nolint:cyclop,gocognit,wsl_v5 // Command-specific flag translation keeps GitHub issue refs and watch flags unambiguous.
+func translateIssueRunCommandArgs(prefix, tail []string, fs *flag.FlagSet) cliArgPlan {
+	out := []string{"--issue-watch", "--issue-watch-once"}
+	runRef := ""
+
+	for i := 0; i < len(tail); i++ {
+		arg := tail[i]
+		if arg == "--" {
+			if i+1 >= len(tail) {
+				break
+			}
+			if runRef != "" {
+				return cliArgPlan{Err: fmt.Errorf("issue run accepts exactly one issue reference; got extra argument %q", tail[i+1])}
+			}
+
+			runRef = tail[i+1]
+			if i+2 < len(tail) {
+				return cliArgPlan{Err: fmt.Errorf("issue run accepts exactly one issue reference; got extra argument %q", tail[i+2])}
+			}
+
+			break
+		}
+
+		name, value, hasValue := splitIssueWatchFlag(arg)
+		switch name {
+		case "github":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github", next)
+			i = nextIndex
+		case "label":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-label", next)
+			i = nextIndex
+		case "github-api-url":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github-api-url", next)
+			i = nextIndex
+		case "github-token":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-github-token", next)
+			i = nextIndex
+		case issueWatchCommandFlagName:
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-command", next)
+			i = nextIndex
+		case "validation-command":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-validation-command", next)
+			i = nextIndex
+		case "command-timeout-seconds":
+			next, nextIndex, err := issueWatchFlagValue(name, value, hasValue, tail, i)
+			if err != nil {
+				return cliArgPlan{Err: err}
+			}
+			out = append(out, "--issue-watch-command-timeout-seconds", next)
+			i = nextIndex
+		case onceCommandName:
+			// issue run is intrinsically one-shot; accept --once without routing it
+			// to the chat one-shot flag, which would consume the issue reference.
+		case issueWatchDryRunModeName:
+			out = appendIssueWatchBoolFlag(out, "--issue-watch-dry-run", value, hasValue)
+		default:
+			if strings.HasPrefix(arg, "-") {
+				var ok bool
+				out, i, ok = appendKnownIssueWatchFlag(out, tail, i, fs)
+				if ok {
+					continue
+				}
+
+				return cliArgPlan{Err: fmt.Errorf("unknown issue run flag %q; run `atteler help issue`", arg)}
+			}
+			if runRef != "" {
+				return cliArgPlan{Err: fmt.Errorf("issue run accepts exactly one issue reference; got extra argument %q", arg)}
+			}
+
+			runRef = arg
+		}
+	}
+
+	if strings.TrimSpace(runRef) == "" {
+		return cliArgPlan{Err: errors.New("issue run requires an issue reference; run `atteler help issue`")}
+	}
+
+	out = append(out, "--issue-watch-run", runRef)
+
+	return cliArgPlan{Args: appendCLIArgs(prefix, out...)}
+}
+
+func appendKnownIssueWatchFlag(args, tail []string, index int, fs *flag.FlagSet) (out []string, nextIndex int, ok bool) {
+	arg := tail[index]
+	if !knownFlagArg(arg, fs) || !issueWatchPassthroughFlag(arg) {
+		return args, index, false
+	}
+
+	args = append(args, arg)
+	if flagConsumesSeparateValue(arg, fs) && index+1 < len(tail) && !isFlagArg(tail[index+1]) {
+		args = append(args, tail[index+1])
+		index++
+	}
+
+	return args, index, true
+}
+
+func issueWatchPassthroughFlag(arg string) bool {
+	name := normalizeHelpName(flagName(arg))
+	switch name {
+	case "autonomy",
+		"permission-mode",
+		"allow-operation",
+		"deny-operation",
+		"issue-watch-github",
+		"issue-watch-label",
+		"issue-watch-once",
+		"issue-watch-dry-run",
+		"issue-watch-github-api-url",
+		"issue-watch-github-token",
+		"issue-watch-run",
+		"issue-watch-interval-seconds",
+		"issue-watch-command",
+		"issue-watch-validation-command",
+		"issue-watch-command-timeout-seconds":
+		return true
+	default:
+		return false
+	}
+}
+
+func splitIssueWatchFlag(arg string) (name, value string, hasValue bool) {
+	name = strings.TrimLeft(arg, "-")
+	if before, after, ok := strings.Cut(name, "="); ok {
+		return before, after, true
+	}
+
+	return name, "", false
+}
+
+func issueWatchFlagValue(name, inlineValue string, hasValue bool, tail []string, index int) (value string, nextIndex int, err error) {
+	if hasValue {
+		if strings.TrimSpace(inlineValue) == "" {
+			return "", index, fmt.Errorf("issue watch flag --%s requires a value", name)
+		}
+
+		return inlineValue, index, nil
+	}
+
+	if index+1 >= len(tail) || strings.HasPrefix(tail[index+1], "-") {
+		return "", index, fmt.Errorf("issue watch flag --%s requires a value", name)
+	}
+
+	return tail[index+1], index + 1, nil
+}
+
+func appendIssueWatchBoolFlag(args []string, flagName, value string, hasValue bool) []string {
+	if !hasValue {
+		return append(args, flagName)
+	}
+
+	return append(args, flagName+"="+value)
 }
 
 func strictUnknownDomainCommand(domain cliHelpDomain, selector string) bool {
@@ -185,7 +475,7 @@ func translateDomainFlagPrefixArgs(prefix []string, domain cliHelpDomain, rest [
 
 	if _, ok := lookupDomainCommand(domain, commandRest[0]); !ok {
 		if domain.Name == autoresearchDomainName {
-			return translateDomainCommandArgs(appendCLIArgs(prefix, scopedPrefix...), domain, append([]string{rest[0], "run"}, commandRest...), fs)
+			return translateDomainCommandArgs(appendCLIArgs(prefix, scopedPrefix...), domain, append([]string{rest[0], runCommandName}, commandRest...), fs)
 		}
 
 		if strictUnknownDomainCommand(domain, rest[0]) {
