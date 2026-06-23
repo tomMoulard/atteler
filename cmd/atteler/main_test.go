@@ -1517,6 +1517,20 @@ func TestInitRTKPluginWritesManifestAndScripts(t *testing.T) {
 	assert.NotZero(t, info.Mode()&0o100)
 }
 
+func TestInitRTKPluginPrintsPrivacyHintForAttelerPath(t *testing.T) { //nolint:paralleltest // captures process-global stdout.
+	dir := filepath.Join(t.TempDir(), ".atteler", "plugins", "rtk")
+
+	var err error
+
+	stdout := captureStdout(t, func() {
+		err = initRTKPlugin(t.Context(), dir)
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, stdout, "privacy_hint=")
+	assert.Contains(t, stdout, "ignored/private by default")
+}
+
 func TestPromptComplete_AgentCandidatesAndFormatting(t *testing.T) {
 	t.Parallel()
 

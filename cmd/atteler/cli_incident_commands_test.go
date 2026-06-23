@@ -64,7 +64,7 @@ func TestRunIncidentDiagnoseWithFileBuildsRedactedReport(t *testing.T) {
 		}
 	}`), 0o600))
 
-	reportPath := filepath.Join(root, "incident-report.md")
+	reportPath := filepath.Join(root, ".atteler", "incident.md")
 	var out bytes.Buffer
 	err := runIncidentDiagnoseWithWriter(t.Context(), &out, root, incidentDiagnoseCommandInput{
 		SentryIssue:  "API-912",
@@ -78,6 +78,8 @@ func TestRunIncidentDiagnoseWithFileBuildsRedactedReport(t *testing.T) {
 	assert.Contains(t, got, "Incident: sentry API-912")
 	assert.Contains(t, got, "Stack trace points to pkg/auth/session.go:184")
 	assert.Contains(t, got, "Write the failing regression test before changing production code")
+	assert.Contains(t, got, "privacy_hint=")
+	assert.Contains(t, got, "ignored/private by default")
 	assert.NotContains(t, got, "alice@example.com")
 	assert.NotContains(t, got, "secret-token")
 

@@ -225,6 +225,7 @@ provenance:
 	}
 
 	fmt.Println("RTK plugin written to " + dir)
+	printAttelerArtifactPrivacyHint(dir)
 	fmt.Println("Add this to your atteler config:")
 	fmt.Println(rtkPluginConfigSnippet(dir))
 	fmt.Println("Then run: atteler --run-plugin rtk/version")
