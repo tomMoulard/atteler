@@ -7927,11 +7927,9 @@ A second binary, `cmd/symphony`, runs the standalone issue-queue scheduler — s
 
 `pkg/llm/llm.go` defines the `Provider` interface (`Name`, `Models`,
 `FetchModels`, `HealthCheck`, `Complete`, `ModelContextWindow`). Built-in
-providers are `anthropic`, `claude-code`, `codex`, `openai`, and `ollama`. The
-Codex and Claude Code providers shell out to the user's installed CLIs
-(`codex exec`, `claude --print`) so they reuse those subscriptions instead of
-direct API quota, running from atteler's working directory with bounded tool
-sets.
+providers are `anthropic`, `claude-code`, `codex`, `openai`, and `ollama`.
+Codex and Claude Code reuse locally stored OAuth credentials, but completions
+are direct HTTPS calls from atteler rather than shelling out to those CLIs.
 
 `pkg/llm/registry.go`'s `AutoRegister` / `AutoRegisterWithConfigContext` is the
 canonical factory: it tries to construct every known provider and silently skips
@@ -7995,8 +7993,9 @@ without a successful final chunk, so callers keep any partial content while
 still treating the response as failed. Adapters use `llm.DefaultStreamBuffer`
 (or an unbuffered channel) and select on the caller's context when sending
 chunks — a slow renderer applies backpressure rather than letting tokens
-accumulate. Codex and Ollama expose native streaming adapters; other providers
-use `StreamFromComplete` unless they implement `StreamProvider`.
+accumulate. The built-in Anthropic, Claude Code, Codex, Ollama, and OpenAI
+providers expose native streaming adapters; custom providers use
+`StreamFromComplete` unless they implement `StreamProvider`.
 
 ## Conventions
 

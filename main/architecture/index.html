@@ -981,11 +981,9 @@
 <h2 id="llm-provider-layer">LLM provider layer<a class="headerlink" href="#llm-provider-layer" title="Permanent link">&para;</a></h2>
 <p><code>pkg/llm/llm.go</code> defines the <code>Provider</code> interface (<code>Name</code>, <code>Models</code>,
 <code>FetchModels</code>, <code>HealthCheck</code>, <code>Complete</code>, <code>ModelContextWindow</code>). Built-in
-providers are <code>anthropic</code>, <code>claude-code</code>, <code>codex</code>, <code>openai</code>, and <code>ollama</code>. The
-Codex and Claude Code providers shell out to the user's installed CLIs
-(<code>codex exec</code>, <code>claude --print</code>) so they reuse those subscriptions instead of
-direct API quota, running from atteler's working directory with bounded tool
-sets.</p>
+providers are <code>anthropic</code>, <code>claude-code</code>, <code>codex</code>, <code>openai</code>, and <code>ollama</code>.
+Codex and Claude Code reuse locally stored OAuth credentials, but completions
+are direct HTTPS calls from atteler rather than shelling out to those CLIs.</p>
 <p><code>pkg/llm/registry.go</code>'s <code>AutoRegister</code> / <code>AutoRegisterWithConfigContext</code> is the
 canonical factory: it tries to construct every known provider and silently skips
 any whose credentials are unavailable. Provider implementations stay stateless
@@ -1076,8 +1074,9 @@ without a successful final chunk, so callers keep any partial content while
 still treating the response as failed. Adapters use <code>llm.DefaultStreamBuffer</code>
 (or an unbuffered channel) and select on the caller's context when sending
 chunks — a slow renderer applies backpressure rather than letting tokens
-accumulate. Codex and Ollama expose native streaming adapters; other providers
-use <code>StreamFromComplete</code> unless they implement <code>StreamProvider</code>.</p>
+accumulate. The built-in Anthropic, Claude Code, Codex, Ollama, and OpenAI
+providers expose native streaming adapters; custom providers use
+<code>StreamFromComplete</code> unless they implement <code>StreamProvider</code>.</p>
 <h2 id="conventions">Conventions<a class="headerlink" href="#conventions" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Context propagation is strict.</strong> Only <code>cmd/atteler</code> and <code>cmd/symphony</code>
