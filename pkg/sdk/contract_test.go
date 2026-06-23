@@ -148,6 +148,7 @@ func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
 	assert.Contains(t, docs, "pkg/sdk.CompatibilityPolicy")
 	assert.Contains(t, docs, "Release compatibility checklist")
 	assert.Contains(t, docs, "deprecation window, migration path")
+	assert.Contains(t, docs, "go test ./pkg/sdk ./pkg/review")
 }
 
 func TestSDKDocsMentionExportedFacadeIdentifiers(t *testing.T) {

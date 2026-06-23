@@ -111,9 +111,9 @@ workflows requested by external callers:
 | Worktree/session usage | `examples/worktree-session` |
 
 Each directory is a small `main` package and is compiled by `go test
-./examples/...`. The package-level examples in `pkg/sdk` also run under
-`go test ./pkg/sdk` and avoid live provider credentials by using a local fake
-provider.
+./examples/...`. The package-level examples in `pkg/sdk` and `pkg/review` also
+run under `go test ./pkg/sdk ./pkg/review` and avoid live provider credentials
+by using local fake providers or deterministic review data.
 
 ## Minimal one-shot chat
 
