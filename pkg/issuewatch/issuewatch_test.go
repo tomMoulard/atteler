@@ -440,6 +440,21 @@ func TestRunOnceExecutesLocalWorkflowInWorktreeAndCapturesEvidence(t *testing.T)
 	assert.Contains(t, implementation, "M README.md")
 	assert.Contains(t, implementation, "?? notes/evidence.txt")
 
+	runData, err := os.ReadFile(run.Artifacts.RunJSON)
+	require.NoError(t, err)
+
+	var stored RunMetadata
+	require.NoError(t, json.Unmarshal(runData, &stored))
+	assert.Equal(t, statusSucceeded, stored.Status)
+	assert.True(t, stored.Workflow.Run)
+	assert.True(t, stored.Workflow.Passed)
+	assert.True(t, stored.Validation.Run)
+	assert.True(t, stored.Validation.Passed)
+	assert.Contains(t, stored.ChangedFiles, "M README.md")
+	assert.Contains(t, stored.ChangedFiles, "?? notes/evidence.txt")
+	require.Len(t, stored.Validation.Results, 1)
+	assert.Contains(t, stored.Validation.Results[0].Stdout, "validation-out")
+
 	state, err := LoadState(filepath.Join(root, defaultStatePath))
 	require.NoError(t, err)
 	assert.Equal(t, statusSucceeded, state.Runs["node-8"].Status)
