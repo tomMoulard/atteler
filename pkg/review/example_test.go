@@ -30,6 +30,34 @@ func ExampleNewRunPlan() {
 	// 3 aggregate-verdict
 }
 
+func ExampleFormatPlan() {
+	plan, err := review.NewRunPlan(review.RunPlanOptions{
+		Reviewers: []review.Reviewer{{Name: "quality-reviewer"}},
+		Paths:     []string{"pkg/sdk"},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(review.FormatPlan(plan))
+
+	// Output:
+	// reviewers:
+	//   - quality-reviewer
+	// paths:
+	//   - pkg/sdk
+	// rounds:
+	//   - 1	independent-review	Independent review	reviewers=quality-reviewer
+	//   - 2	cross-review	Cross-review	reviewers=quality-reviewer
+	//   - 3	aggregate-verdict	Aggregate verdict	reviewers=quality-reviewer
+	// gates:
+	//   - tests pass
+	//   - types pass
+	//   - lint pass
+	//   - no new flakes
+	//   - behavioral diff reviewed
+}
+
 func ExampleFormatReport() {
 	report := review.Report{
 		Reviewer: "quality-reviewer",
