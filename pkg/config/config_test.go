@@ -1563,14 +1563,11 @@ func TestLoadFiles_AgentToolPolicy(t *testing.T) {
 agents:
   legacy:
     tool_policy: allow-all
-  compatibility:
-    tool_policy: compatibility
 `)
 
 	cfg, _, err := LoadFiles([]string{path})
 	require.NoError(t, err)
 	assert.Equal(t, "allow-all", cfg.Agents["legacy"].ToolPolicy)
-	assert.Equal(t, "compatibility", cfg.Agents["compatibility"].ToolPolicy)
 }
 
 func TestLoadWithDiagnostics_WarnsWhenAgentToolPolicyQuietAllowAlias(t *testing.T) {
@@ -1581,8 +1578,16 @@ func TestLoadWithDiagnostics_WarnsWhenAgentToolPolicyQuietAllowAlias(t *testing.
 	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
 	require.NoError(t, os.WriteFile(projectConfig, []byte(`
 agents:
-  reviewer:
+  allow:
     tool_policy: allow
+  all:
+    tool_policy: all
+  compat:
+    tool_policy: compat
+  compatibility:
+    tool_policy: compatibility
+  legacy:
+    tool_policy: legacy
 `), 0o600))
 
 	t.Setenv("HOME", tempDir)
@@ -1597,7 +1602,15 @@ agents:
 	_, _, _, diagnostics, err := LoadWithDiagnostics()
 	require.NoError(t, err)
 
-	assertDiagnosticContains(t, diagnostics, `agents.reviewer.tool_policy: unsupported agent tool_policy "allow"`)
+	for _, want := range []string{
+		`agents.all.tool_policy: unsupported agent tool_policy "all"`,
+		`agents.allow.tool_policy: unsupported agent tool_policy "allow"`,
+		`agents.compat.tool_policy: unsupported agent tool_policy "compat"`,
+		`agents.compatibility.tool_policy: unsupported agent tool_policy "compatibility"`,
+		`agents.legacy.tool_policy: unsupported agent tool_policy "legacy"`,
+	} {
+		assertDiagnosticContains(t, diagnostics, want)
+	}
 }
 
 func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {

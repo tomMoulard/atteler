@@ -143,7 +143,7 @@ func normalizeToolPolicy(policy string) string {
 	switch policy {
 	case "", ToolPolicyDeny, "deny-all", "default":
 		return ToolPolicyDeny
-	case ToolPolicyAllowAll, "compatibility", "legacy":
+	case ToolPolicyAllowAll:
 		return ToolPolicyAllowAll
 	default:
 		return policy

@@ -47,7 +47,7 @@ func TestRegistry_UpsertNormalizesToolPolicyAndPermissions(t *testing.T) {
 
 	registry.Upsert(Agent{
 		Name:            " runner ",
-		ToolPolicy:      "compatibility",
+		ToolPolicy:      ToolPolicyAllowAll,
 		ToolPermissions: map[string]bool{" BASH ": false, " READ ": true},
 	})
 
@@ -63,7 +63,7 @@ func TestRegistry_UpsertNormalizesToolPolicyAndPermissions(t *testing.T) {
 func TestAgent_HasToolPermission_QuietAllowAliasesDoNotEnableCompatibilityMode(t *testing.T) {
 	t.Parallel()
 
-	for _, policy := range []string{"allow", "all", "compat"} {
+	for _, policy := range []string{"allow", "all", "compat", "compatibility", "legacy"} {
 		t.Run(policy, func(t *testing.T) {
 			t.Parallel()
 
