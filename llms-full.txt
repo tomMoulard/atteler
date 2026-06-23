@@ -1098,7 +1098,9 @@ Capability or tool allow/deny map. Prefer capability-scoped grants (`read`,
 `search`, `shell.readonly`, `shell.write`, `network`, `filesystem.write`) over
 raw tool names. `shell.readonly` advertises bash but denies mutating shell commands at runtime,
 and shell network commands also require `network: true`. Unlisted tools are denied unless
-`tool_policy: allow-all` is set.
+`tool_policy: allow-all` is set. Explicit `false` entries take precedence over
+overlapping raw-tool or capability grants, so a broad deny such as
+`filesystem.write: false` blocks `write: true` and `edit: true`.
 
 - **Default:** omitted or `{}` denies every tool. Use explicit capability grants.
 - **Compatibility:** set `tool_policy: allow-all` only when a legacy agent should receive every advertised tool, including future tools.
