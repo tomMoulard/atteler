@@ -22,6 +22,7 @@ import (
 )
 
 const (
+	testIssueWatchIssuesPath           = "/repos/owner/repo/issues"
 	testIssueWatchIssue232Path         = "/repos/owner/repo/issues/232"
 	testIssueWatchIssue232CommentsPath = testIssueWatchIssue232Path + "/comments"
 )
@@ -263,7 +264,7 @@ func TestRunIssueWatchIterationDryRunFetchesGitHubCandidatesByLabel(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/repos/owner/repo/issues":
+		case testIssueWatchIssuesPath:
 			issueListSeen.Store(true)
 			assert.Equal(t, http.MethodGet, r.Method)
 			assert.Equal(t, "open", r.URL.Query().Get("state"))
@@ -338,6 +339,58 @@ func TestRunIssueWatchIterationDryRunFetchesSingleGitHubIssueWithoutLabel(t *tes
 	assert.Empty(t, result.Runs)
 }
 
+func TestRunIssueWatchIterationDirectRunCreatesLocalArtifactsWithoutLabel(t *testing.T) {
+	var (
+		issueSeen atomic.Bool
+		listSeen  atomic.Bool
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testIssueWatchIssue232Path:
+			issueSeen.Store(true)
+			assert.Equal(t, http.MethodGet, r.Method)
+			assert.Empty(t, r.URL.Query().Get("labels"))
+			writeIssueWatchTestJSON(t, w, `{"node_id":"node-232","number":232,"title":"Run directly","state":"open","body":"Direct issue run.","html_url":"https://github.com/owner/repo/issues/232","created_at":"2026-06-20T10:00:00Z","updated_at":"2026-06-20T10:05:00Z","labels":[]}`)
+		case testIssueWatchIssue232CommentsPath:
+			assert.Equal(t, http.MethodGet, r.Method)
+			writeIssueWatchTestJSON(t, w, `[]`)
+		case testIssueWatchIssuesPath:
+			listSeen.Store(true)
+			w.WriteHeader(http.StatusInternalServerError)
+			writeIssueWatchTestJSON(t, w, `{"message":"direct run should not list candidates"}`)
+		default:
+			t.Errorf("unexpected GitHub test request %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+			writeIssueWatchTestJSON(t, w, `{"message":"not found"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	root := initIssueWatchCLIRepo(t)
+	t.Setenv(worktree.EnvDir, filepath.Join(t.TempDir(), "worktrees"))
+
+	result, err := runIssueWatchIteration(t.Context(), root, cliOptions{
+		issueWatchGitHub:         "owner/repo",
+		issueWatchGitHubEndpoint: server.URL,
+		issueWatchRunRef:         "232",
+	})
+	require.NoError(t, err)
+
+	assert.True(t, issueSeen.Load())
+	assert.False(t, listSeen.Load())
+	require.Len(t, result.Candidates, 1)
+	require.Len(t, result.Runs, 1)
+	run := result.Runs[0]
+	assert.Equal(t, "GH-232", run.IssueIdentifier)
+	assert.FileExists(t, run.Artifacts.IssueJSON)
+	assert.FileExists(t, run.Artifacts.Plan)
+	assert.FileExists(t, run.Artifacts.RunJSON)
+	assert.DirExists(t, run.WorktreePath)
+}
+
 func TestRunIssueWatchIterationLocalRunUsesReadOnlyGitHubRequests(t *testing.T) {
 	var (
 		mutationRequests atomic.Int32
@@ -356,7 +409,7 @@ func TestRunIssueWatchIterationLocalRunUsesReadOnlyGitHubRequests(t *testing.T) 
 		}
 
 		switch r.URL.Path {
-		case "/repos/owner/repo/issues":
+		case testIssueWatchIssuesPath:
 			issueListSeen.Store(true)
 			assert.Equal(t, "open", r.URL.Query().Get("state"))
 			assert.Equal(t, "atteler-agent", r.URL.Query().Get("labels"))
