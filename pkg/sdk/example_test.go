@@ -3,6 +3,7 @@ package sdk_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -243,6 +244,29 @@ func ExampleAttachWorktree() {
 	// atteler/session-1 main
 }
 
+func ExampleAttachNewWorktree() {
+	repo := newExampleGitRepo()
+
+	defer func() {
+		if cleanupErr := os.RemoveAll(repo); cleanupErr != nil {
+			panic(cleanupErr)
+		}
+	}()
+
+	sessionState := sdk.NewSession(sdk.SessionOptions{Model: "fake-model"})
+	sessionState.ID = "sdk-example"
+
+	info, err := sdk.AttachNewWorktree(exampleContext{}, repo, &sessionState)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(info.Branch, sessionState.WorktreeBranch, sessionState.WorktreePath != "")
+
+	// Output:
+	// atteler/sdk-example atteler/sdk-example true
+}
+
 func writeExampleScript(path, content string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		panic(err)
@@ -256,6 +280,35 @@ func writeExampleScript(path, content string) {
 	if err := os.Chmod(path, 0o700); err != nil {
 		panic(err)
 	}
+}
+
+func newExampleGitRepo() string {
+	root, err := os.MkdirTemp("", "atteler-sdk-worktree-*")
+	if err != nil {
+		panic(err)
+	}
+
+	commands := [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "example@example.com"},
+		{"git", "config", "user.name", "SDK Example"},
+		{"git", "config", "commit.gpgsign", "false"},
+		{"git", "config", "core.excludesFile", os.DevNull},
+		{"git", "commit", "--allow-empty", "-m", "init"},
+	}
+
+	for _, command := range commands {
+		cmd := exec.CommandContext(exampleContext{}, command[0], command[1:]...) //nolint:gosec // Example runs static git commands in a temporary repository.
+		cmd.Dir = root
+
+		if out, runErr := cmd.CombinedOutput(); runErr != nil {
+			_ = os.RemoveAll(root)
+
+			panic(fmt.Sprintf("%v: %s: %v", command, out, runErr))
+		}
+	}
+
+	return root
 }
 
 // exampleContext keeps package examples free of process-root context creation;
