@@ -315,7 +315,7 @@ func callLLMWithTools(
 		Autonomy:           request.autonomy,
 		EstimateCostMicros: costEstimator,
 		CheckpointInterval: request.agentLoopCheckpointInterval,
-		Policy:             llm.DefaultToolPolicyForAutonomy(request.autonomy),
+		Policy:             toolPolicyForAgent(llm.DefaultToolPolicyForAutonomy(request.autonomy), request.agent, request.hasAgent),
 		CheckpointSink:     agentLoopCheckpointSink(request.agentLoopCheckpointPath),
 	})
 	if err != nil {

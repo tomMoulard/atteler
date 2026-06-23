@@ -1221,7 +1221,8 @@ func agentConfigHasGeneration(cfg AgentConfig) bool {
 }
 
 func agentConfigHasCollections(cfg AgentConfig) bool {
-	return cfg.ToolPermissions != nil ||
+	return strings.TrimSpace(cfg.ToolPolicy) != "" ||
+		cfg.ToolPermissions != nil ||
 		cfg.FallbackModels != nil ||
 		cfg.Capabilities != nil ||
 		cfg.Triggers != nil ||

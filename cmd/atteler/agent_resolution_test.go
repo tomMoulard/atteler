@@ -169,6 +169,42 @@ func TestResolveAgent_IneligibleToolMatchRequiresOverride(t *testing.T) {
 	require.ErrorContains(t, err, "missing required tool permission")
 }
 
+func TestDefaultToolsForAgent_DeniesOmittedConfiguredAgentTools(t *testing.T) {
+	t.Parallel()
+
+	tools := defaultToolsForAgent(agentSelection{
+		agent: agent.Agent{Name: "default"},
+		ok:    true,
+	})
+
+	assert.Empty(t, tools)
+}
+
+func TestDefaultToolsForAgent_ExplicitCompatibilityAllowsDefaults(t *testing.T) {
+	t.Parallel()
+
+	tools := defaultToolsForAgent(agentSelection{
+		agent: agent.Agent{Name: "legacy", ToolPolicy: agent.ToolPolicyAllowAll},
+		ok:    true,
+	})
+
+	assert.Len(t, tools, len(llm.DefaultTools()))
+}
+
+func TestAgentExecuteMetadataForAgentIncludesEffectivePermissions(t *testing.T) {
+	t.Parallel()
+
+	metadata := agentExecuteMetadataForAgent(agent.Agent{
+		Name:            "reviewer",
+		ToolPermissions: map[string]bool{"read": true, "search": true},
+	}, true, "reviewer")
+
+	assert.Equal(t, "reviewer", metadata["agent"])
+	assert.Equal(t, "deny", metadata["tool_policy"])
+	assert.Equal(t, "read,search", metadata["effective_permissions"])
+	assert.Equal(t, "glob,grep,read", metadata["effective_tools"])
+}
+
 func TestRequestModelAndFallbacks_AppliesAgentRoutingPolicy(t *testing.T) {
 	t.Parallel()
 

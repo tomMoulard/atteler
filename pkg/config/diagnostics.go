@@ -974,9 +974,35 @@ func inspectAgents(path string, value *yaml.Node) []Diagnostic {
 				inspectNamedFields(path, prefix+".routing_policy", routingPolicy, knownRoutingPolicyFields(), nil)...,
 			)
 		}
+
+		if toolPolicy := mappingValue(entry, "tool_policy"); toolPolicy != nil {
+			diagnostics = append(diagnostics, inspectAgentToolPolicy(path, prefix+".tool_policy", toolPolicy)...)
+		}
 	})
 
 	return diagnostics
+}
+
+func inspectAgentToolPolicy(path, field string, value *yaml.Node) []Diagnostic {
+	if value.Kind != yaml.ScalarNode {
+		return []Diagnostic{{
+			Severity: DiagnosticError,
+			Path:     path,
+			Field:    field,
+			Message:  "agent tool_policy must be a string",
+		}}
+	}
+
+	if isSupportedAgentToolPolicy(value.Value) {
+		return nil
+	}
+
+	return []Diagnostic{{
+		Severity: DiagnosticWarning,
+		Path:     path,
+		Field:    field,
+		Message:  fmt.Sprintf("unsupported agent tool_policy %q; effective policy is deny (supported: deny, allow-all)", value.Value),
+	}}
 }
 
 func inspectModelRoles(path string, value *yaml.Node) []Diagnostic {
@@ -1270,6 +1296,7 @@ func knownAgentFields() map[string]bool {
 		"top_p":             true,
 		"seed":              true,
 		"tools":             true,
+		"tool_policy":       true,
 		"routing_policy":    true,
 		"model":             true,
 		"mode":              true,

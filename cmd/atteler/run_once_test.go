@@ -141,6 +141,8 @@ func TestRunOnceCompleteWithAutonomyTranscriptReturnsToolMessages(t *testing.T) 
 		nil,
 		llm.AgentLoopBudget{MaxModelCalls: 3, MaxToolCalls: 2},
 		autonomy.Full,
+		agent.Agent{},
+		false,
 		0,
 		responseRecordOptions{},
 		nil,

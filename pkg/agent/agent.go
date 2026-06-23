@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ type Agent struct {
 	TopP            *float64
 	Seed            *int
 	ToolPermissions map[string]bool
+	ToolPolicy      string
 	RoutingPolicy   modelroute.Policy
 	Name            string
 	Model           string
@@ -61,6 +63,7 @@ func NewRegistry(configs map[string]config.AgentConfig) *Registry {
 			Mode:            strings.TrimSpace(cfg.Mode),
 			ModelMode:       strings.TrimSpace(cfg.ModelMode),
 			ToolPermissions: cloneToolPermissions(cfg.ToolPermissions),
+			ToolPolicy:      normalizeToolPolicy(cfg.ToolPolicy),
 			RoutingPolicy:   routingPolicyFromConfig(cfg.RoutingPolicy),
 			Description:     strings.TrimSpace(cfg.Description),
 			Personality:     strings.TrimSpace(cfg.Personality),
@@ -125,24 +128,112 @@ func (a Agent) ModelChain() []string {
 	return modelChain(a.Model, a.FallbackModels)
 }
 
-// HasToolPermission reports whether the agent is allowed to use the named tool.
-// When ToolPermissions is nil (not configured), all tools are permitted.
-// When ToolPermissions is non-nil, only tools explicitly set to true are allowed.
-func (a Agent) HasToolPermission(tool string) bool {
-	if a.ToolPermissions == nil {
-		return true
-	}
+const (
+	// ToolPolicyDeny is the default tool policy: omitted tools deny every tool.
+	ToolPolicyDeny = "deny"
+	// ToolPolicyAllowAll is an explicit compatibility mode for legacy configs
+	// that intentionally want every advertised tool, including future tools.
+	ToolPolicyAllowAll = "allow-all"
+)
 
-	return a.ToolPermissions[normalizeToolName(tool)]
+func normalizeToolPolicy(policy string) string {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	policy = strings.ReplaceAll(policy, "_", "-")
+
+	switch policy {
+	case "", ToolPolicyDeny, "deny-all", "default":
+		return ToolPolicyDeny
+	case ToolPolicyAllowAll, "allow", "all", "compat", "compatibility", "legacy":
+		return ToolPolicyAllowAll
+	default:
+		return policy
+	}
 }
 
-// FilterTools returns only the tools the agent is permitted to use.
-// When ToolPermissions is nil, all tools pass through unchanged.
-func (a Agent) FilterTools(tools []llm.ToolDefinition) []llm.ToolDefinition {
-	if a.ToolPermissions == nil {
-		return tools
+// HasToolPermission reports whether the agent is allowed to use the named tool.
+// Omitted ToolPermissions are deny-by-default unless ToolPolicy is explicitly
+// set to allow-all compatibility mode. ToolPermissions may contain either raw
+// tool names or capability-scoped grants such as read, search, shell.readonly,
+// shell.write, network, and filesystem.write.
+func (a Agent) HasToolPermission(tool string) bool {
+	tool = normalizeToolName(tool)
+	if tool == "" {
+		return false
 	}
 
+	if normalizeToolPolicy(a.ToolPolicy) == ToolPolicyAllowAll {
+		return !toolDeniedByPermissions(tool, a.ToolPermissions)
+	}
+
+	return toolAllowedByPermissions(tool, a.ToolPermissions)
+}
+
+func toolAllowedByPermissions(tool string, permissions map[string]bool) bool {
+	if len(permissions) == 0 {
+		return false
+	}
+
+	if allowed, ok := permissions[tool]; ok {
+		return allowed
+	}
+
+	for capability, allowed := range permissions {
+		if !allowed {
+			continue
+		}
+
+		if capabilityGrantsTool(capability, tool) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func toolDeniedByPermissions(tool string, permissions map[string]bool) bool {
+	if len(permissions) == 0 {
+		return false
+	}
+
+	if allowed, ok := permissions[tool]; ok {
+		return !allowed
+	}
+
+	for capability, allowed := range permissions {
+		if allowed {
+			continue
+		}
+
+		if capabilityGrantsTool(capability, tool) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func capabilityGrantsTool(capability, tool string) bool {
+	switch normalizeToolName(capability) {
+	case "read":
+		return tool == llm.ToolNameRead || tool == llm.ToolNameGlob || tool == llm.ToolNameGrep
+	case "search":
+		return tool == llm.ToolNameGlob || tool == llm.ToolNameGrep
+	case "shell.readonly", "shell.read-only", "shell.read":
+		return tool == llm.ToolNameBash
+	case "shell.write", "shell":
+		return tool == llm.ToolNameBash
+	case "filesystem.write", "filesystem", "fs.write":
+		return tool == llm.ToolNameWrite || tool == llm.ToolNameEdit
+	case "network":
+		return tool == "network" || tool == "web" || tool == "fetch"
+	default:
+		return false
+	}
+}
+
+// FilterTools returns only the tools the agent is permitted to use. Omitted
+// permissions deny every tool unless ToolPolicy is explicit allow-all.
+func (a Agent) FilterTools(tools []llm.ToolDefinition) []llm.ToolDefinition {
 	filtered := make([]llm.ToolDefinition, 0, len(tools))
 	for _, tool := range tools {
 		if a.HasToolPermission(tool.Name) {
@@ -151,6 +242,189 @@ func (a Agent) FilterTools(tools []llm.ToolDefinition) []llm.ToolDefinition {
 	}
 
 	return filtered
+}
+
+// RuntimeToolPolicy wraps next with agent-level capability enforcement for tool calls.
+// Filtering advertised tools catches most cases before the model can call them;
+// this runtime guard preserves capability scope for coarse tools like bash where
+// shell.readonly and shell.write share the same underlying tool name.
+func (a Agent) RuntimeToolPolicy(next llm.ToolPolicy) llm.ToolPolicy {
+	if next == nil {
+		next = func(_ context.Context, _ llm.ToolCall, _ llm.AgentLoopBudgetSnapshot) llm.ToolPolicyDecision {
+			return llm.ToolPolicyDecision{
+				Verdict:     llm.ToolPolicyAllow,
+				Reason:      "tool passed default allow policy",
+				MatchedRule: "agent.default_allow",
+			}
+		}
+	}
+
+	return func(ctx context.Context, call llm.ToolCall, budget llm.AgentLoopBudgetSnapshot) llm.ToolPolicyDecision {
+		if !a.HasToolPermission(call.Name) {
+			return llm.ToolPolicyDecision{
+				Verdict:     llm.ToolPolicyDeny,
+				Reason:      "agent tool policy does not grant " + normalizeToolName(call.Name),
+				MatchedRule: "agent.tool.deny",
+			}
+		}
+
+		if decision, ok := a.shellReadOnlyDecision(call); ok {
+			return decision
+		}
+
+		if decision, ok := a.networkDecision(call); ok {
+			return decision
+		}
+
+		return next(ctx, call, budget)
+	}
+}
+
+func (a Agent) shellReadOnlyDecision(call llm.ToolCall) (llm.ToolPolicyDecision, bool) {
+	if normalizeToolName(call.Name) != llm.ToolNameBash {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	if normalizeToolPolicy(a.ToolPolicy) == ToolPolicyAllowAll ||
+		!permissionMapAllows(a.ToolPermissions, "shell.readonly", "shell.read-only", "shell.read") ||
+		permissionMapAllows(a.ToolPermissions, "shell.write", "shell", llm.ToolNameBash) {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	command, ok := call.Input["command"].(string)
+	if !ok || !llm.BashCommandRequiresWrite(command) {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	return llm.ToolPolicyDecision{
+		Verdict:     llm.ToolPolicyDeny,
+		Reason:      "agent shell.readonly grant does not allow mutating shell commands",
+		MatchedRule: "agent.shell.readonly",
+	}, true
+}
+
+func (a Agent) networkDecision(call llm.ToolCall) (llm.ToolPolicyDecision, bool) {
+	if normalizeToolName(call.Name) != llm.ToolNameBash {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	if normalizeToolPolicy(a.ToolPolicy) == ToolPolicyAllowAll && !permissionMapDenies(a.ToolPermissions, "network") {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	if permissionMapAllows(a.ToolPermissions, "network") {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	command, ok := call.Input["command"].(string)
+	if !ok || !llm.BashCommandRequiresNetwork(command) {
+		return llm.ToolPolicyDecision{}, false
+	}
+
+	return llm.ToolPolicyDecision{
+		Verdict:     llm.ToolPolicyDeny,
+		Reason:      "agent tool policy does not grant network capability",
+		MatchedRule: "agent.network.deny",
+	}, true
+}
+
+func permissionMapAllows(permissions map[string]bool, names ...string) bool {
+	if len(permissions) == 0 || len(names) == 0 {
+		return false
+	}
+
+	allowedNames := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		allowedNames[normalizeToolName(name)] = struct{}{}
+	}
+
+	for name, allowed := range permissions {
+		if !allowed {
+			continue
+		}
+
+		if _, ok := allowedNames[normalizeToolName(name)]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func permissionMapDenies(permissions map[string]bool, names ...string) bool {
+	if len(permissions) == 0 || len(names) == 0 {
+		return false
+	}
+
+	deniedNames := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		deniedNames[normalizeToolName(name)] = struct{}{}
+	}
+
+	for name, allowed := range permissions {
+		if allowed {
+			continue
+		}
+
+		if _, ok := deniedNames[normalizeToolName(name)]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// EffectiveToolNames returns sorted tool names from tools that the agent may use.
+func (a Agent) EffectiveToolNames(tools []llm.ToolDefinition) []string {
+	filtered := a.FilterTools(tools)
+	names := make([]string, 0, len(filtered))
+
+	for _, tool := range filtered {
+		name := normalizeToolName(tool.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+// EffectivePermissionNames returns sorted configured capability/tool grants that
+// are allowed for this agent. It intentionally reports capability names (for
+// example shell.readonly) separately from EffectiveToolNames so humans can see
+// the scoped grant that caused a raw tool such as bash to be advertised.
+func (a Agent) EffectivePermissionNames() []string {
+	if normalizeToolPolicy(a.ToolPolicy) == ToolPolicyAllowAll {
+		return []string{ToolPolicyAllowAll}
+	}
+
+	if len(a.ToolPermissions) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(a.ToolPermissions))
+
+	for name, allowed := range a.ToolPermissions {
+		name = normalizeToolName(name)
+		if name != "" && allowed {
+			names = append(names, name)
+		}
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+// ToolPolicySummary returns a compact user-facing summary of the effective tool policy.
+func (a Agent) ToolPolicySummary() string {
+	if normalizeToolPolicy(a.ToolPolicy) == ToolPolicyAllowAll {
+		return ToolPolicyAllowAll
+	}
+
+	return ToolPolicyDeny
 }
 
 // Upsert inserts or replaces an agent by name. It is used to merge built-in

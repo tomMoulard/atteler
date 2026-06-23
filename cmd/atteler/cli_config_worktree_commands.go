@@ -28,20 +28,23 @@ import (
 )
 
 type agentDescription struct {
-	Temperature    *float64 `yaml:"temperature,omitempty"`
-	TopP           *float64 `yaml:"top_p,omitempty"`
-	Seed           *int     `yaml:"seed,omitempty"`
-	Name           string   `yaml:"name"`
-	ModelMode      string   `yaml:"model_mode,omitempty"`
-	ReasoningLevel string   `yaml:"reasoning_level,omitempty"`
-	Model          string   `yaml:"model,omitempty"`
-	Description    string   `yaml:"description,omitempty"`
-	Personality    string   `yaml:"personality,omitempty"`
-	SystemPrompt   string   `yaml:"system_prompt,omitempty"`
-	FallbackModels []string `yaml:"fallback_models,omitempty"`
-	Capabilities   []string `yaml:"capabilities,omitempty"`
-	Triggers       []string `yaml:"triggers,omitempty"`
-	MaxTokens      int      `yaml:"max_tokens,omitempty"`
+	Temperature          *float64 `yaml:"temperature,omitempty"`
+	TopP                 *float64 `yaml:"top_p,omitempty"`
+	Seed                 *int     `yaml:"seed,omitempty"`
+	Name                 string   `yaml:"name"`
+	ModelMode            string   `yaml:"model_mode,omitempty"`
+	ReasoningLevel       string   `yaml:"reasoning_level,omitempty"`
+	Model                string   `yaml:"model,omitempty"`
+	ToolPolicy           string   `yaml:"tool_policy"`
+	EffectivePermissions []string `yaml:"effective_permissions"`
+	EffectiveTools       []string `yaml:"effective_tools"`
+	Description          string   `yaml:"description,omitempty"`
+	Personality          string   `yaml:"personality,omitempty"`
+	SystemPrompt         string   `yaml:"system_prompt,omitempty"`
+	FallbackModels       []string `yaml:"fallback_models,omitempty"`
+	Capabilities         []string `yaml:"capabilities,omitempty"`
+	Triggers             []string `yaml:"triggers,omitempty"`
+	MaxTokens            int      `yaml:"max_tokens,omitempty"`
 }
 
 type doctorDiagnosticLevel struct {
@@ -68,21 +71,29 @@ type doctorDiagnosticCounts struct {
 
 //nolint:govet // field order follows the user-facing JSON report grouping.
 type doctorOfflineJSONReport struct {
-	SchemaVersion     int                          `json:"schema_version"`
-	Command           string                       `json:"command"`
-	Status            string                       `json:"status"`
-	DiagnosticLevels  []doctorDiagnosticLevel      `json:"diagnostic_levels"`
-	Config            doctorOfflineConfigReport    `json:"config"`
-	ConfigDiagnostics doctorDiagnosticCounts       `json:"config_diagnostics"`
-	State             doctorOfflineStateReport     `json:"state"`
-	StateDiagnostics  doctorDiagnosticCounts       `json:"state_diagnostics"`
-	Sessions          doctorOfflinePathReport      `json:"sessions"`
-	KnownProviders    []string                     `json:"known_providers"`
-	Agents            []string                     `json:"agents"`
-	HookEvents        int                          `json:"hook_events"`
-	Plugins           []string                     `json:"plugins"`
-	Diagnostics       []doctorDiagnostic           `json:"diagnostics,omitempty"`
-	Sources           []appconfig.SourceDiagnostic `json:"sources,omitempty"`
+	SchemaVersion     int                           `json:"schema_version"`
+	Command           string                        `json:"command"`
+	Status            string                        `json:"status"`
+	DiagnosticLevels  []doctorDiagnosticLevel       `json:"diagnostic_levels"`
+	Config            doctorOfflineConfigReport     `json:"config"`
+	ConfigDiagnostics doctorDiagnosticCounts        `json:"config_diagnostics"`
+	State             doctorOfflineStateReport      `json:"state"`
+	StateDiagnostics  doctorDiagnosticCounts        `json:"state_diagnostics"`
+	Sessions          doctorOfflinePathReport       `json:"sessions"`
+	KnownProviders    []string                      `json:"known_providers"`
+	Agents            []string                      `json:"agents"`
+	AgentPermissions  []doctorAgentPermissionReport `json:"agent_permissions,omitempty"`
+	HookEvents        int                           `json:"hook_events"`
+	Plugins           []string                      `json:"plugins"`
+	Diagnostics       []doctorDiagnostic            `json:"diagnostics,omitempty"`
+	Sources           []appconfig.SourceDiagnostic  `json:"sources,omitempty"`
+}
+
+type doctorAgentPermissionReport struct {
+	Name                 string   `json:"name"`
+	ToolPolicy           string   `json:"tool_policy"`
+	EffectivePermissions []string `json:"effective_permissions"`
+	EffectiveTools       []string `json:"effective_tools"`
 }
 
 //nolint:govet // field order follows the user-facing JSON report grouping.
@@ -108,6 +119,7 @@ type doctorOfflinePathReport struct {
 }
 
 const (
+	doctorAgentToolsNone     = "none"
 	doctorCommandNameOffline = "doctor-offline"
 	doctorStatusFailed       = "failed"
 	doctorStatusOK           = "ok"
@@ -147,26 +159,75 @@ func describeAgent(agents *agent.Registry, name string) error {
 
 func formatAgentDescription(activeAgent agent.Agent) (string, error) {
 	out, err := yaml.Marshal(agentDescription{
-		Name:           activeAgent.Name,
-		Model:          activeAgent.Model,
-		Description:    activeAgent.Description,
-		Personality:    activeAgent.Personality,
-		SystemPrompt:   activeAgent.SystemPrompt,
-		FallbackModels: activeAgent.FallbackModels,
-		Capabilities:   activeAgent.Capabilities,
-		Temperature:    activeAgent.Temperature,
-		TopP:           activeAgent.TopP,
-		Seed:           activeAgent.Seed,
-		ModelMode:      activeAgent.ModelMode,
-		ReasoningLevel: activeAgent.ReasoningLevel,
-		Triggers:       activeAgent.Triggers,
-		MaxTokens:      activeAgent.MaxTokens,
+		Name:                 activeAgent.Name,
+		Model:                activeAgent.Model,
+		ToolPolicy:           activeAgent.ToolPolicySummary(),
+		EffectivePermissions: activeAgent.EffectivePermissionNames(),
+		EffectiveTools:       activeAgent.EffectiveToolNames(llm.DefaultTools()),
+		Description:          activeAgent.Description,
+		Personality:          activeAgent.Personality,
+		SystemPrompt:         activeAgent.SystemPrompt,
+		FallbackModels:       activeAgent.FallbackModels,
+		Capabilities:         activeAgent.Capabilities,
+		Temperature:          activeAgent.Temperature,
+		TopP:                 activeAgent.TopP,
+		Seed:                 activeAgent.Seed,
+		ModelMode:            activeAgent.ModelMode,
+		ReasoningLevel:       activeAgent.ReasoningLevel,
+		Triggers:             activeAgent.Triggers,
+		MaxTokens:            activeAgent.MaxTokens,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal agent description: %w", err)
 	}
 
 	return string(out), nil
+}
+
+func printDoctorAgentPermissions(w io.Writer, registry *agent.Registry, names []string) {
+	reports := doctorAgentPermissionReports(registry, names)
+	if len(reports) == 0 {
+		return
+	}
+
+	fmt.Fprintln(w, "agent_effective_permissions:")
+
+	for _, report := range reports {
+		permissions := doctorAgentToolsNone
+		if len(report.EffectivePermissions) > 0 {
+			permissions = strings.Join(report.EffectivePermissions, ",")
+		}
+
+		tools := doctorAgentToolsNone
+		if len(report.EffectiveTools) > 0 {
+			tools = strings.Join(report.EffectiveTools, ",")
+		}
+
+		fmt.Fprintf(w, "  - %s: policy=%s permissions=%s tools=%s\n", report.Name, report.ToolPolicy, permissions, tools)
+	}
+}
+
+func doctorAgentPermissionReports(registry *agent.Registry, names []string) []doctorAgentPermissionReport {
+	if registry == nil || len(names) == 0 {
+		return nil
+	}
+
+	reports := make([]doctorAgentPermissionReport, 0, len(names))
+	for _, name := range names {
+		activeAgent, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+
+		reports = append(reports, doctorAgentPermissionReport{
+			Name:                 name,
+			ToolPolicy:           activeAgent.ToolPolicySummary(),
+			EffectivePermissions: activeAgent.EffectivePermissionNames(),
+			EffectiveTools:       activeAgent.EffectiveToolNames(llm.DefaultTools()),
+		})
+	}
+
+	return reports
 }
 
 func doctor(ctx context.Context, state appState) error {
@@ -262,6 +323,7 @@ func printDoctorOverview(ctx context.Context, state appState, providers []string
 		fmt.Println("agents: none configured")
 	} else {
 		fmt.Println("agents: " + strings.Join(agents, ", "))
+		printDoctorAgentPermissions(os.Stdout, state.agentRegistry, agents)
 	}
 
 	if state.worktreeInfo != nil {
@@ -635,11 +697,14 @@ func doctorOffline(ctx context.Context, opts cliOptions) error {
 
 	printProviderCompatibilityMatrixSummary()
 
-	agents := agent.NewRegistry(cfg.Agents).List()
+	agentRegistry := agent.NewRegistry(cfg.Agents)
+	agents := agentRegistry.List()
+
 	if len(agents) == 0 {
 		fmt.Println("agents: none configured")
 	} else {
 		fmt.Println("agents: " + strings.Join(agents, ", "))
+		printDoctorAgentPermissions(os.Stdout, agentRegistry, agents)
 	}
 
 	fmt.Println("hook_events: " + strconv.Itoa(len(events.SupportedEventTypes())))
@@ -714,7 +779,10 @@ func newDoctorOfflineJSONReport(
 	store := session.NewStore(opts.sessionDir)
 	providerNames := knownProviderNames()
 
-	agents := append([]string{}, agent.NewRegistry(cfg.Agents).List()...)
+	agentRegistry := agent.NewRegistry(cfg.Agents)
+	agents := append([]string{}, agentRegistry.List()...)
+	agentPermissions := doctorAgentPermissionReports(agentRegistry, agents)
+
 	plugins := append([]string{}, cfg.Plugins.Paths...)
 
 	configSummary := summarizeSourceDiagnostics(sources)
@@ -758,12 +826,13 @@ func newDoctorOfflineJSONReport(
 			Path:   store.Dir(),
 			Status: pathStatus(ctx, store.Dir()),
 		},
-		KnownProviders: providerNames,
-		Agents:         agents,
-		HookEvents:     len(events.SupportedEventTypes()),
-		Plugins:        plugins,
-		Diagnostics:    reportDiagnostics,
-		Sources:        sources,
+		KnownProviders:   providerNames,
+		Agents:           agents,
+		AgentPermissions: agentPermissions,
+		HookEvents:       len(events.SupportedEventTypes()),
+		Plugins:          plugins,
+		Diagnostics:      reportDiagnostics,
+		Sources:          sources,
 	}, nil
 }
 

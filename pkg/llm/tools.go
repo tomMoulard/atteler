@@ -539,6 +539,27 @@ type bashAutonomyFinding struct {
 	detail string
 }
 
+// BashCommandRequiresNetwork reports whether command is classified as requiring
+// network capability by Atteler's permission parser.
+func BashCommandRequiresNetwork(command string) bool {
+	for _, op := range permission.CommandOperations(bashToolName, []string{"-lc", command}, command, "", "llm.bash_tool") {
+		if op.Kind == permission.OperationNetwork {
+			return true
+		}
+	}
+
+	return false
+}
+
+// BashCommandRequiresWrite reports whether Atteler's shell classifier considers
+// command outside read-only shell inspection. It is intentionally conservative:
+// any mutating, remote, branch, commit, push, or PR action requires shell.write.
+func BashCommandRequiresWrite(command string) bool {
+	_, ok := classifyBashAutonomyAction(command)
+
+	return ok
+}
+
 func classifyBashAutonomyAction(command string) (bashAutonomyFinding, bool) {
 	return classifyBashAutonomyActionDepth(command, 0)
 }

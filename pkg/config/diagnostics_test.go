@@ -31,6 +31,7 @@ agent_loop:
 agents:
   reviewer:
     prompt: review safely
+    tool_policy: surprise
     routing_policy:
       preferred_providers: [openai]
       max_latency_ms: 1200
@@ -67,6 +68,7 @@ skill_learning:
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "model", "default_model")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "generation.reasoning", "generation.reasoning_level")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "agents.reviewer.prompt", "agents.reviewer.system_prompt")
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticWarning, "agents.reviewer.tool_policy", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "generation.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "agents.reviewer.routing_policy.surprise", "")
 	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.openai.token", "")

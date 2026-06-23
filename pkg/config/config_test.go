@@ -1502,6 +1502,74 @@ context:
 	assert.Equal(t, "9", policyOrigin[0].Value)
 }
 
+func TestLoadWithDiagnostics_WarnsWhenAgentToolsOmitted(t *testing.T) {
+	tempDir := t.TempDir()
+	projectDir := filepath.Join(tempDir, "project")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".atteler"), 0o700))
+
+	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte(`
+agents:
+  reviewer:
+    model: gpt-review
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex-home"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv(EnvPath, "")
+	t.Chdir(projectDir)
+
+	_, _, _, diagnostics, err := LoadWithDiagnostics()
+	require.NoError(t, err)
+
+	assertDiagnosticContains(t, diagnostics, "agents.reviewer.tools: agent has no tool policy")
+}
+
+func TestLoadWithDiagnostics_WarnsWhenAgentToolPolicyUnsupported(t *testing.T) {
+	tempDir := t.TempDir()
+	projectDir := filepath.Join(tempDir, "project")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".atteler"), 0o700))
+
+	projectConfig := filepath.Join(projectDir, ".atteler", "config.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte(`
+agents:
+  reviewer:
+    tool_policy: surprise
+`), 0o600))
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "xdg-config"))
+	t.Setenv("CODEX_HOME", filepath.Join(tempDir, "codex-home"))
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("FORGE_CONFIG", "")
+	t.Setenv(EnvPath, "")
+	t.Chdir(projectDir)
+
+	_, _, _, diagnostics, err := LoadWithDiagnostics()
+	require.NoError(t, err)
+
+	assertDiagnosticContains(t, diagnostics, `agents.reviewer.tool_policy: unsupported agent tool_policy "surprise"`)
+}
+
+func TestLoadFiles_AgentToolPolicy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "agents.yaml", `
+agents:
+  legacy:
+    tool_policy: allow-all
+`)
+
+	cfg, _, err := LoadFiles([]string{path})
+	require.NoError(t, err)
+	assert.Equal(t, "allow-all", cfg.Agents["legacy"].ToolPolicy)
+}
+
 func TestLoadWithDiagnostics_ReturnsHarnessWarningsWhenConfigFileFails(t *testing.T) {
 	tempDir := t.TempDir()
 	configHome := filepath.Join(tempDir, "xdg-config")

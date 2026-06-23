@@ -152,6 +152,11 @@ func starterTemplateConfig() Config {
 				Temperature:    &temperature,
 				MaxTokens:      2048,
 				Triggers:       []string{"review this", "code review"},
+				ToolPermissions: map[string]bool{
+					"read":   true,
+					"search": true,
+				},
+				ToolPolicy: "deny",
 				SystemPrompt: "You are a concise code reviewer. Focus on correctness, " +
 					"tests, security, and maintainability.",
 			},

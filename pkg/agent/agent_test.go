@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -342,13 +343,13 @@ func TestRegistry_RendersApprovedFeedbackGuidanceAtRuntime(t *testing.T) {
 	assert.NotContains(t, reviewer.SystemPrompt, "pending checks")
 }
 
-func TestAgent_HasToolPermission_NilPermissions(t *testing.T) {
+func TestAgent_HasToolPermission_NilPermissionsDenyByDefault(t *testing.T) {
 	t.Parallel()
 
 	a := Agent{Name: "default"}
-	assert.True(t, a.HasToolPermission("bash"), "nil ToolPermissions should allow all tools")
-	assert.True(t, a.HasToolPermission("write"), "nil ToolPermissions should allow all tools")
-	assert.True(t, a.HasToolPermission("anything"), "nil ToolPermissions should allow all tools")
+	assert.False(t, a.HasToolPermission("bash"), "nil ToolPermissions should deny shell by default")
+	assert.False(t, a.HasToolPermission("write"), "nil ToolPermissions should deny writes by default")
+	assert.False(t, a.HasToolPermission("anything"), "nil ToolPermissions should deny future tools by default")
 }
 
 func TestAgent_HasToolPermission_ExplicitPermissions(t *testing.T) {
@@ -369,13 +370,13 @@ func TestAgent_HasToolPermission_ExplicitPermissions(t *testing.T) {
 	assert.False(t, a.HasToolPermission(" "), "blank tool name should deny")
 }
 
-func TestAgent_FilterTools_NilPermissions(t *testing.T) {
+func TestAgent_FilterTools_NilPermissionsDenyByDefault(t *testing.T) {
 	t.Parallel()
 
 	a := Agent{Name: "default"}
 	tools := llm.DefaultTools()
 	filtered := a.FilterTools(tools)
-	assert.Equal(t, tools, filtered, "nil ToolPermissions should return all tools")
+	assert.Empty(t, filtered, "nil ToolPermissions should deny all tools")
 }
 
 func TestAgent_FilterTools_ExplicitPermissions(t *testing.T) {
@@ -394,6 +395,128 @@ func TestAgent_FilterTools_ExplicitPermissions(t *testing.T) {
 	filtered := a.FilterTools(tools)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, " Bash ", filtered[0].Name)
+}
+
+func TestAgent_FilterTools_CapabilityPermissions(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name: "reviewer",
+		ToolPermissions: map[string]bool{
+			"read":             true,
+			"filesystem.write": false,
+		},
+	}
+
+	filtered := a.FilterTools([]llm.ToolDefinition{
+		{Name: llm.ToolNameRead},
+		{Name: llm.ToolNameGrep},
+		{Name: llm.ToolNameGlob},
+		{Name: llm.ToolNameWrite},
+		{Name: "future-default-tool"},
+	})
+
+	assert.Equal(t, []string{llm.ToolNameGlob, llm.ToolNameGrep, llm.ToolNameRead}, a.EffectiveToolNames(filtered))
+	assert.False(t, a.HasToolPermission("future-default-tool"), "capability grants must not allow unknown future tools")
+}
+
+func TestAgent_HasToolPermission_AllowAllCompatibilityMode(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name:       "legacy",
+		ToolPolicy: ToolPolicyAllowAll,
+		ToolPermissions: map[string]bool{
+			"write":       false,
+			"shell.write": false,
+		},
+	}
+
+	assert.True(t, a.HasToolPermission("future-default-tool"))
+	assert.False(t, a.HasToolPermission("write"), "explicit raw false should override compatibility allow-all")
+	assert.False(t, a.HasToolPermission("bash"), "explicit capability false should override compatibility allow-all")
+}
+
+func TestAgent_ToolPolicy_ShellReadOnlyDeniesMutatingCommand(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{Name: "reader", ToolPermissions: map[string]bool{"shell.readonly": true}}
+	policy := a.RuntimeToolPolicy(func(_ context.Context, _ llm.ToolCall, _ llm.AgentLoopBudgetSnapshot) llm.ToolPolicyDecision {
+		return llm.ToolPolicyDecision{Verdict: llm.ToolPolicyAllow, Reason: "base allowed"}
+	})
+
+	readDecision := policy(t.Context(), llm.ToolCall{Name: llm.ToolNameBash, Input: map[string]any{"command": "pwd && ls"}}, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyAllow, readDecision.Verdict)
+
+	writeDecision := policy(t.Context(), llm.ToolCall{Name: llm.ToolNameBash, Input: map[string]any{"command": "touch changed.txt"}}, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyDeny, writeDecision.Verdict)
+	assert.Equal(t, "agent.shell.readonly", writeDecision.MatchedRule)
+}
+
+func TestAgent_RuntimeToolPolicy_RequiresNetworkCapabilityForShellNetwork(t *testing.T) {
+	t.Parallel()
+
+	basePolicy := func(_ context.Context, _ llm.ToolCall, _ llm.AgentLoopBudgetSnapshot) llm.ToolPolicyDecision {
+		return llm.ToolPolicyDecision{Verdict: llm.ToolPolicyAllow, Reason: "base allowed"}
+	}
+	call := llm.ToolCall{Name: llm.ToolNameBash, Input: map[string]any{"command": "curl https://example.com"}}
+
+	withoutNetwork := Agent{Name: "reader", ToolPermissions: map[string]bool{"shell.readonly": true}}
+	denyDecision := withoutNetwork.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyDeny, denyDecision.Verdict)
+	assert.Equal(t, "agent.network.deny", denyDecision.MatchedRule)
+
+	writeShellWithoutNetwork := Agent{Name: "writer", ToolPermissions: map[string]bool{"shell.write": true}}
+	writeShellDecision := writeShellWithoutNetwork.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyDeny, writeShellDecision.Verdict)
+	assert.Equal(t, "agent.network.deny", writeShellDecision.MatchedRule)
+
+	rawBashWithoutNetwork := Agent{Name: "raw", ToolPermissions: map[string]bool{llm.ToolNameBash: true}}
+	rawBashDecision := rawBashWithoutNetwork.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyDeny, rawBashDecision.Verdict)
+	assert.Equal(t, "agent.network.deny", rawBashDecision.MatchedRule)
+
+	withNetwork := Agent{Name: "reader", ToolPermissions: map[string]bool{"shell.readonly": true, "network": true}}
+	allowDecision := withNetwork.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyAllow, allowDecision.Verdict)
+}
+
+func TestAgent_RuntimeToolPolicy_AllowAllNetworkCanBeExplicitlyDenied(t *testing.T) {
+	t.Parallel()
+
+	basePolicy := func(_ context.Context, _ llm.ToolCall, _ llm.AgentLoopBudgetSnapshot) llm.ToolPolicyDecision {
+		return llm.ToolPolicyDecision{Verdict: llm.ToolPolicyAllow, Reason: "base allowed"}
+	}
+	call := llm.ToolCall{Name: llm.ToolNameBash, Input: map[string]any{"command": "curl https://example.com"}}
+
+	legacy := Agent{Name: "legacy", ToolPolicy: ToolPolicyAllowAll}
+	legacyDecision := legacy.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyAllow, legacyDecision.Verdict)
+
+	networkDenied := Agent{
+		Name:            "legacy",
+		ToolPolicy:      ToolPolicyAllowAll,
+		ToolPermissions: map[string]bool{"network": false},
+	}
+	denyDecision := networkDenied.RuntimeToolPolicy(basePolicy)(t.Context(), call, llm.AgentLoopBudgetSnapshot{})
+	assert.Equal(t, llm.ToolPolicyDeny, denyDecision.Verdict)
+	assert.Equal(t, "agent.network.deny", denyDecision.MatchedRule)
+}
+
+func TestAgent_EffectivePermissionNames(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name: "scoped",
+		ToolPermissions: map[string]bool{
+			"shell.readonly": true,
+			"write":          false,
+			"read":           true,
+		},
+	}
+
+	assert.Equal(t, []string{"read", "shell.readonly"}, a.EffectivePermissionNames())
+	assert.Equal(t, []string{ToolPolicyAllowAll}, Agent{Name: "legacy", ToolPolicy: ToolPolicyAllowAll}.EffectivePermissionNames())
 }
 
 func TestAgent_FilterTools_EmptyPermissions(t *testing.T) {
@@ -442,5 +565,5 @@ func TestRegistry_ModeAndToolPermissions(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, simple.Mode)
 	assert.Nil(t, simple.ToolPermissions)
-	assert.True(t, simple.HasToolPermission("bash"), "nil map should allow all")
+	assert.False(t, simple.HasToolPermission("bash"), "nil map should deny shell by default")
 }

@@ -925,8 +925,11 @@ agents:
     triggers: ["review this", "code review"]  # default: [] (none)
     capabilities: ["review", "security"]      # default: [] (none)
     references: ["docs/style.md"]             # default: [] (none)
-    tools:                                    # default: {} (all tools allowed)
-      bash: false
+    tool_policy: deny                        # default: deny; allow-all is explicit legacy compatibility
+    tools:                                    # default: omitted/{} (no tools allowed)
+      read: true                             # capability grant: read, glob, grep
+      search: true                           # capability grant: glob, grep
+      shell.readonly: false                  # capability grant: read-only bash commands only
     hidden: false                             # default: false
     routing_policy:                           # default: none
       preferred_providers: ["openai"]         # default: [] (none)
@@ -1091,17 +1094,24 @@ agents:
 
 #### `tools`
 
-Per-tool allow/deny map, keyed by tool name. Unlisted tools follow the global
-permission policy.
+Capability or tool allow/deny map. Prefer capability-scoped grants (`read`,
+`search`, `shell.readonly`, `shell.write`, `network`, `filesystem.write`) over
+raw tool names. `shell.readonly` advertises bash but denies mutating shell commands at runtime,
+and shell network commands also require `network: true`. Unlisted tools are denied unless
+`tool_policy: allow-all` is set.
 
-- **Default:** `{}` (all tools allowed by policy)
+- **Default:** omitted or `{}` denies every tool. Use explicit capability grants.
+- **Compatibility:** set `tool_policy: allow-all` only when a legacy agent should receive every advertised tool, including future tools.
 
 ```yaml
 agents:
   reviewer:
     tools:
-      bash: false      # deny shell for this agent
-      read: true
+      read: true             # read, glob, grep
+      search: true           # glob, grep
+      network: false         # network-capable shell commands
+      filesystem.write: false
+      shell.readonly: false
 ```
 
 #### `hidden`

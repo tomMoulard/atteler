@@ -1226,3 +1226,35 @@ func providerInspectionUtilityRequested(opts cliOptions) bool {
 		opts.explainModelResolution != "" ||
 		opts.doctor
 }
+
+func agentExecuteMetadataForAgent(activeAgent agent.Agent, hasAgent bool, agentName string) map[string]string {
+	metadata := map[string]string{
+		"agent": agentName,
+	}
+
+	if !hasAgent {
+		return metadata
+	}
+
+	metadata["tool_policy"] = activeAgent.ToolPolicySummary()
+	metadata["effective_permissions"] = joinAgentPermissionSummary(activeAgent.EffectivePermissionNames())
+	metadata["effective_tools"] = joinAgentPermissionSummary(activeAgent.EffectiveToolNames(llm.DefaultTools()))
+
+	return metadata
+}
+
+func joinAgentPermissionSummary(names []string) string {
+	if len(names) == 0 {
+		return doctorAgentToolsNone
+	}
+
+	return strings.Join(names, ",")
+}
+
+func toolPolicyForAgent(base llm.ToolPolicy, activeAgent agent.Agent, hasAgent bool) llm.ToolPolicy {
+	if !hasAgent {
+		return base
+	}
+
+	return activeAgent.RuntimeToolPolicy(base)
+}
