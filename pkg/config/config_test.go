@@ -1827,6 +1827,156 @@ context:
 	assert.Equal(t, "false", privateNetworksOrigin.Value)
 }
 
+func TestLoadFilesWithOrigins_CoversEveryReferencePolicyField(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "refs-policy-all-fields.yaml", `
+context:
+  reference_policy:
+    allowed_schemes: [https]
+    denied_schemes: [ftp]
+    allowed_hosts: [docs.example.com]
+    denied_hosts: [blocked.example.com]
+    allowed_ports: [443]
+    denied_ports: [81]
+    local_roots: [docs]
+    denied_local_roots: [secrets]
+    allowed_globs: ["docs/**/*.md"]
+    denied_globs: ["**/*.pem"]
+    content_types: [text/markdown]
+    max_redirects: 2
+    max_files: 7
+    allow_absolute_paths: true
+    allow_private_networks: false
+`)
+
+	_, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	for field := range knownReferencePolicyFields() {
+		origin, ok := origins.Final(referencePolicyFieldPath(field))
+		require.True(t, ok, "missing origin for context.reference_policy.%s", field)
+		assert.Equal(t, OriginExplicitFile, origin.Kind, field)
+		assert.Equal(t, path, origin.Source, field)
+	}
+}
+
+func TestLoadFilesWithOrigins_CoversPluginPolicyOriginPaths(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "plugin-policy.yaml", `
+plugins:
+  policy:
+    permissions:
+      filesystem:
+        read: ["."]
+        write: ["tmp"]
+      network:
+        allow: true
+        hosts: [api.example.com]
+      shell:
+        allow: false
+      env: [PATH]
+      secrets: [API_TOKEN]
+      tools: [git]
+    output:
+      stdout_max_bytes: 4096
+      stderr_max_bytes: 1024
+    trusted_install_sources: [local]
+    require_signature: true
+`)
+
+	_, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	policyOrigin, ok := origins.Final("plugins.policy")
+	require.True(t, ok)
+	assert.Equal(t, OriginExplicitFile, policyOrigin.Kind)
+	assert.Equal(t, path, policyOrigin.Source)
+
+	for _, originPath := range pluginPolicyOriginPaths() {
+		origin, ok := origins.Final(originPath)
+		require.True(t, ok, "missing origin for %s", originPath)
+		assert.Equal(t, OriginExplicitFile, origin.Kind, originPath)
+		assert.Equal(t, path, origin.Source, originPath)
+		assert.Contains(t, origin.Note, "plugin policy replacement", originPath)
+	}
+}
+
+func TestLoadPathSources_PluginPolicyEnvReplacesProjectPolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	project := writeConfig(t, dir, "project.yaml", `
+plugins:
+  policy:
+    permissions:
+      filesystem:
+        read: ["project"]
+        write: ["project-tmp"]
+      network:
+        allow: true
+        hosts: [project.example.com]
+    output:
+      stdout_max_bytes: 4096
+    trusted_install_sources: [project]
+    require_signature: true
+`)
+	envPath := writeConfig(t, dir, "env.yaml", `
+plugins:
+  policy:
+    permissions:
+      filesystem:
+        read: ["env"]
+        write: []
+      network:
+        allow: false
+    output:
+      stderr_max_bytes: 1024
+`)
+
+	cfg, loaded, origins, err := LoadPathSources([]PathSource{
+		{Path: project, Kind: OriginProjectFile},
+		{Path: envPath, Kind: OriginEnvFile},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{project, envPath}, loaded)
+	require.NotNil(t, cfg.Plugins.Policy)
+
+	assert.Equal(t, []string{"env"}, cfg.Plugins.Policy.Permissions.Filesystem.Read)
+	assert.Empty(t, cfg.Plugins.Policy.Permissions.Filesystem.Write)
+	assert.False(t, cfg.Plugins.Policy.Permissions.Network.Allow)
+	assert.Empty(t, cfg.Plugins.Policy.Permissions.Network.Hosts, "env-file plugin policy replaces the whole project policy")
+	assert.Equal(t, 0, cfg.Plugins.Policy.Output.StdoutMaxBytes, "unset nested project output is cleared by replacement")
+	assert.Equal(t, 1024, cfg.Plugins.Policy.Output.StderrMaxBytes)
+	assert.Empty(t, cfg.Plugins.Policy.TrustedInstallSources)
+	assert.False(t, cfg.Plugins.Policy.RequireSignature)
+
+	policyOrigin := origins["plugins.policy"].Chain
+	require.Len(t, policyOrigin, 2)
+	assert.Equal(t, OriginSet, policyOrigin[0].Operation)
+	assert.Equal(t, OriginProjectFile, policyOrigin[0].Kind)
+	assert.Equal(t, OriginReplace, policyOrigin[1].Operation)
+	assert.Equal(t, OriginEnvFile, policyOrigin[1].Kind)
+	assert.Equal(t, envPath, policyOrigin[1].Source)
+
+	readOrigin := origins[pluginPolicyFieldPath("permissions", "filesystem", "read")].Chain
+	require.Len(t, readOrigin, 2)
+	assert.Equal(t, OriginReplace, readOrigin[1].Operation)
+	assert.Equal(t, OriginEnvFile, readOrigin[1].Kind)
+	assert.Equal(t, envPath, readOrigin[1].Source)
+	assert.Equal(t, `["env"]`, readOrigin[1].Value)
+
+	hostsOrigin := origins[pluginPolicyFieldPath("permissions", "network", "hosts")].Chain
+	require.Len(t, hostsOrigin, 2)
+	assert.Equal(t, OriginReplace, hostsOrigin[1].Operation)
+	assert.Equal(t, OriginEnvFile, hostsOrigin[1].Kind)
+	assert.Equal(t, envPath, hostsOrigin[1].Source)
+	assert.Equal(t, "null", hostsOrigin[1].Value)
+}
+
 func TestLoadWithOrigins_PreservesContextReferencePolicy(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")

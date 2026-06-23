@@ -71,7 +71,8 @@ func writeConfigExplanationWithDiagnostics(
 	fmt.Fprintln(w, "Replacement semantics:")
 	fmt.Fprintln(w, "  - Scalar fields override earlier scalar values.")
 	fmt.Fprintln(w, "  - Provider and agent maps merge by name; fields inside the same name override independently.")
-	fmt.Fprintln(w, "  - Lists and per-agent tool maps replace the earlier value in full when set later.")
+	fmt.Fprintln(w, "  - Lists, context.reference_policy lists, and per-agent tool maps replace the earlier value in full when set later.")
+	fmt.Fprintln(w, "  - plugins.policy replaces the entire plugin execution policy; nested permission/output/trust paths show that replacement source.")
 	fmt.Fprintln(w)
 
 	writeConfigExplanationLoadedSources(w, loaded, origins)

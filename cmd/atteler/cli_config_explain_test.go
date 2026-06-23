@@ -210,6 +210,61 @@ func TestWriteConfigExplanation_FiltersFieldPrefixes(t *testing.T) {
 	assert.NotContains(t, got, "default_model:")
 }
 
+func TestWriteConfigExplanation_FiltersReferenceAndPluginPolicyOrigins(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := writeExplainConfigTestFile(t, dir, "cfg.yaml", `
+context:
+  reference_policy:
+    allowed_hosts: [docs.example.com]
+    allow_private_networks: true
+plugins:
+  policy:
+    permissions:
+      filesystem:
+        read: ["."]
+        write: []
+      network:
+        allow: false
+`)
+
+	_, loaded, origins, err := appconfig.LoadFilesWithOrigins([]string{source})
+	require.NoError(t, err)
+
+	var hostsOut strings.Builder
+	writeConfigExplanation(&hostsOut, loaded, origins, "context.reference_policy.allowed_hosts")
+	hosts := hostsOut.String()
+	assert.Contains(t, hosts, "context.reference_policy.allowed_hosts: %5B%22docs.example.com%22%5D")
+	assert.Contains(t, hosts, "set by "+source+" [explicit-file]")
+	assert.NotContains(t, hosts, "(no fields matched)")
+
+	var privateOut strings.Builder
+	writeConfigExplanation(&privateOut, loaded, origins, "context.reference_policy.allow_private_networks")
+	privateNetworks := privateOut.String()
+	assert.Contains(t, privateNetworks, "context.reference_policy.allow_private_networks: true")
+	assert.Contains(t, privateNetworks, "set by "+source+" [explicit-file]")
+	assert.NotContains(t, privateNetworks, "(no fields matched)")
+
+	var pluginOut strings.Builder
+	writeConfigExplanation(&pluginOut, loaded, origins, "plugins.policy")
+	pluginPolicy := pluginOut.String()
+	assert.Contains(t, pluginPolicy, "plugins.policy: configured")
+	assert.Contains(t, pluginPolicy, "plugins.policy.permissions.filesystem.read: %5B%22.%22%5D")
+	assert.Contains(t, pluginPolicy, "plugins.policy.permissions.network.allow: false")
+	assert.Contains(t, pluginPolicy, "replaces the entire plugin execution policy")
+	assert.NotContains(t, pluginPolicy, "(no fields matched)")
+}
+
+func writeExplainConfigTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o600))
+
+	return path
+}
+
 func TestWriteConfigExplanationWithDiagnostics_PrintsImporterWarnings(t *testing.T) {
 	t.Parallel()
 
