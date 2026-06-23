@@ -40,7 +40,8 @@ The machine-readable source of the compatibility table is
 `pkg/sdk.APIContract()` and its policy text is exported as
 `pkg/sdk.CompatibilityPolicy`. The JSON envelope uses `schema_version`,
 `compatibility_policy`, and `packages`. Each package row uses stable snake-case
-fields: `import_path`, `stability`, `since`, and `summary`.
+fields: `import_path`, `stability`, `since`, `summary`, and optional
+`primary_identifiers` for stable package/type/function entry points.
 
 ## Release compatibility checklist
 

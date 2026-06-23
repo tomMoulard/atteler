@@ -102,8 +102,38 @@ func TestPackageContracts_JSONContractUsesStableFieldNames(t *testing.T) {
 		"import_path": "github.com/tommoulard/atteler/pkg/sdk",
 		"stability": "stable",
 		"since": "v0.1.0",
-		"summary": "stable facade for common SDK workflows"
+		"summary": "stable facade for common SDK workflows",
+		"primary_identifiers": [
+			"RunOneShotChat",
+			"NewProviderRegistry",
+			"BuildMemoryIndex",
+			"NewReviewRun",
+			"RunPlugin",
+			"NewSession",
+			"AttachNewWorktree",
+			"APIContract",
+			"CompatibilityPolicy",
+			"Contract",
+			"PackageContract",
+			"Stability",
+			"PackageContracts",
+			"PackagesByStability"
+		]
 	}]`, string(data))
+}
+
+func TestPackageContracts_PrimaryIdentifiersAreDocumented(t *testing.T) {
+	t.Parallel()
+
+	docs := readRepoFile(t, "docs", "sdk.md")
+
+	for _, contract := range sdk.PackagesByStability(sdk.StabilityStable) {
+		require.NotEmpty(t, contract.PrimaryIdentifiers, "%s should declare primary identifiers", contract.ImportPath)
+
+		for _, identifier := range contract.PrimaryIdentifiers {
+			assert.Contains(t, docs, "`"+identifier+"`", "%s primary identifier %s should be documented", contract.ImportPath, identifier)
+		}
+	}
 }
 
 func TestAPIContract_JSONContractUsesStableEnvelope(t *testing.T) {
@@ -133,10 +163,13 @@ func TestAPIContract_ReturnsPackageCopy(t *testing.T) {
 	require.NotEmpty(t, contract.Packages)
 
 	contract.Packages[0].ImportPath = "mutated"
+	require.NotEmpty(t, contract.Packages[0].PrimaryIdentifiers)
+	contract.Packages[0].PrimaryIdentifiers[0] = "MutatedIdentifier"
 
 	again := sdk.APIContract()
 	require.NotEmpty(t, again.Packages)
 	assert.NotEqual(t, "mutated", again.Packages[0].ImportPath)
+	assert.NotEqual(t, "MutatedIdentifier", again.Packages[0].PrimaryIdentifiers[0])
 }
 
 func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
@@ -146,6 +179,7 @@ func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
 
 	assert.Contains(t, docs, "pkg/sdk.APIContract()")
 	assert.Contains(t, docs, "pkg/sdk.CompatibilityPolicy")
+	assert.Contains(t, docs, "primary_identifiers")
 	assert.Contains(t, docs, "Release compatibility checklist")
 	assert.Contains(t, docs, "deprecation window, migration path")
 	assert.Contains(t, docs, "go test ./pkg/sdk ./pkg/review")

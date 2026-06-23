@@ -248,9 +248,12 @@ func TestPackagesByStability_ReturnsCopy(t *testing.T) {
 	require.NotEmpty(t, stable)
 
 	stable[0].ImportPath = "mutated"
+	require.NotEmpty(t, stable[0].PrimaryIdentifiers)
+	stable[0].PrimaryIdentifiers[0] = "MutatedIdentifier"
 
 	again := sdk.PackagesByStability(sdk.StabilityStable)
 	assert.NotEqual(t, "mutated", again[0].ImportPath)
+	assert.NotEqual(t, "MutatedIdentifier", again[0].PrimaryIdentifiers[0])
 	assert.Contains(t, sdk.CompatibilityPolicy, "Stable SDK packages")
 	assert.Contains(t, sdk.CompatibilityPolicy, "exported identifiers")
 }

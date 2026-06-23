@@ -45,10 +45,11 @@ const (
 
 // PackageContract documents the SDK compatibility tier for one import path.
 type PackageContract struct {
-	ImportPath string    `json:"import_path"`
-	Stability  Stability `json:"stability"`
-	Since      string    `json:"since"`
-	Summary    string    `json:"summary"`
+	ImportPath         string    `json:"import_path"`
+	Stability          Stability `json:"stability"`
+	Since              string    `json:"since"`
+	Summary            string    `json:"summary"`
+	PrimaryIdentifiers []string  `json:"primary_identifiers,omitempty"`
 }
 
 // Contract is the machine-readable SDK compatibility contract.
@@ -58,47 +59,92 @@ type Contract struct {
 	Packages            []PackageContract `json:"packages"`
 }
 
+func stablePackageContract(name, summary string, identifiers ...string) PackageContract {
+	return PackageContract{
+		ImportPath:         packagePathPrefix + name,
+		Stability:          StabilityStable,
+		Since:              packageSinceV010,
+		Summary:            summary,
+		PrimaryIdentifiers: identifiers,
+	}
+}
+
+func experimentalPackageContract(name, summary string) PackageContract {
+	return PackageContract{
+		ImportPath: packagePathPrefix + name,
+		Stability:  StabilityExperimental,
+		Since:      packageSinceV010,
+		Summary:    summary,
+	}
+}
+
 var packageContracts = []PackageContract{
-	{ImportPath: packagePathPrefix + "sdk", Stability: StabilityStable, Since: packageSinceV010, Summary: "stable facade for common SDK workflows"},
-	{ImportPath: packagePathPrefix + "llm", Stability: StabilityStable, Since: packageSinceV010, Summary: "provider interface, registry, completion, streaming, embeddings, and model metadata"},
-	{ImportPath: packagePathPrefix + "session", Stability: StabilityStable, Since: packageSinceV010, Summary: "durable sessions, export, search summaries, headless run metadata, and multi-agent receipts"},
-	{ImportPath: packagePathPrefix + "memory", Stability: StabilityStable, Since: packageSinceV010, Summary: "local text indexing, persistence, and lexical search"},
-	{ImportPath: packagePathPrefix + "review", Stability: StabilityStable, Since: packageSinceV010, Summary: "review plans, findings, reports, gates, validation, and text formatting"},
-	{ImportPath: packagePathPrefix + "plugin", Stability: StabilityStable, Since: packageSinceV010, Summary: "plugin manifests, policy contracts, registries, dry runs, lockfiles, and bounded entrypoint execution"},
-	{ImportPath: packagePathPrefix + "worktree", Stability: StabilityStable, Since: packageSinceV010, Summary: "context-aware git worktree creation, merge transactions, and cleanup policies"},
-	{ImportPath: packagePathPrefix + "retrieval", Stability: StabilityStable, Since: packageSinceV010, Summary: "shared retrieval query/result contracts used by memory and vector workflows"},
-	{ImportPath: packagePathPrefix + "permission", Stability: StabilityStable, Since: packageSinceV010, Summary: "central side-effect policy and audit decision contracts"},
-	{ImportPath: packagePathPrefix + "events", Stability: StabilityStable, Since: packageSinceV010, Summary: "lifecycle event payloads and hook runner contracts"},
-	{ImportPath: packagePathPrefix + "agent", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "config-backed agent persona registry"},
-	{ImportPath: packagePathPrefix + "agentmemory", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "per-agent vector memory storage"},
-	{ImportPath: packagePathPrefix + "artifactmerge", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "session artifact aggregation and provenance helpers"},
-	{ImportPath: packagePathPrefix + "async", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "dependency-aware task planning primitives"},
-	{ImportPath: packagePathPrefix + "autonomy", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "risk-based capability levels for agent actions"},
-	{ImportPath: packagePathPrefix + "autopilot", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "orchestrator prompt rendering"},
-	{ImportPath: packagePathPrefix + "codegraph", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "dependency-free directed graph primitives for code relationships"},
-	{ImportPath: packagePathPrefix + "codeintel", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "incremental code-intelligence indexes and queries"},
-	{ImportPath: packagePathPrefix + "config", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "layered Atteler configuration loading and migration"},
-	{ImportPath: packagePathPrefix + "contextpack", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "chat-context packing and token-budget helpers"},
-	{ImportPath: packagePathPrefix + "contextref", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "local and URL context-reference expansion"},
-	{ImportPath: packagePathPrefix + "eval", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "text and structured-output evaluation helpers"},
-	{ImportPath: packagePathPrefix + "feedback", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "agent-feedback proposal application helpers"},
-	{ImportPath: packagePathPrefix + "githistory", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "git-log parsing and lexical commit search"},
-	{ImportPath: packagePathPrefix + "incident", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "incident-analysis data structures and renderers"},
-	{ImportPath: packagePathPrefix + "lsp", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "managed language-server lookups"},
-	{ImportPath: packagePathPrefix + "mcp", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "minimal Model Context Protocol request/response contracts"},
-	{ImportPath: packagePathPrefix + "modelroute", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "model routing catalogs, scoring, and telemetry"},
-	{ImportPath: packagePathPrefix + "privacy", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "conservative redaction helpers"},
-	{ImportPath: packagePathPrefix + "promptcomplete", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "deterministic prompt-line completion"},
-	{ImportPath: packagePathPrefix + "research", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "local-first research artifact creation"},
-	{ImportPath: packagePathPrefix + "shell", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "policy-gated process execution and audit records"},
-	{ImportPath: packagePathPrefix + "skill", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "skill filesystem helpers"},
-	{ImportPath: packagePathPrefix + "sourcepolicy", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "harness source-policy discovery"},
-	{ImportPath: packagePathPrefix + "speculate", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "multi-branch speculation planning"},
-	{ImportPath: packagePathPrefix + "subagent", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "bounded concurrent child-agent spawning primitives"},
-	{ImportPath: packagePathPrefix + "symphony", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "Symphony scheduler client and workflow helpers"},
-	{ImportPath: packagePathPrefix + "tasklist", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "JSON-backed task list for agents"},
-	{ImportPath: packagePathPrefix + "vector", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "local vector indexing and search"},
-	{ImportPath: packagePathPrefix + "watch", Stability: StabilityExperimental, Since: packageSinceV010, Summary: "repository quality scan heuristics and gates"},
+	stablePackageContract("sdk", "stable facade for common SDK workflows",
+		"RunOneShotChat", "NewProviderRegistry", "BuildMemoryIndex", "NewReviewRun",
+		"RunPlugin", "NewSession", "AttachNewWorktree", "APIContract",
+		"CompatibilityPolicy", "Contract", "PackageContract", "Stability",
+		"PackageContracts", "PackagesByStability",
+	),
+	stablePackageContract("llm", "provider interface, registry, completion, streaming, embeddings, and model metadata",
+		"Provider", "Registry", "CompleteParams", "Response", "Message",
+		"ToolDefinition", "ResponseFormat",
+	),
+	stablePackageContract("session", "durable sessions, export, search summaries, headless run metadata, and multi-agent receipts",
+		"Session", "Store", "New", "NewStore", "ExportOptions", "HeadlessRun", "MultiAgentRun",
+	),
+	stablePackageContract("memory", "local text indexing, persistence, and lexical search",
+		"Store", "Document", "Result", "NewStore", "Add", "AddFile", "Search", "Save", "Load",
+	),
+	stablePackageContract("review", "review plans, findings, reports, gates, validation, and text formatting",
+		"Reviewer", "Plan", "RunPlanOptions", "NewRunPlan", "Report", "Finding",
+		"GateCheck", "ValidateReport", "FormatPlan", "FormatReport",
+	),
+	stablePackageContract("plugin", "plugin manifests, policy contracts, registries, dry runs, lockfiles, and bounded entrypoint execution",
+		"Manifest", "PermissionSet", "Policy", "AcceptManifestPolicy", "Registry",
+		"RunOptions", "RunEntrypointWithOptions", "RunResult",
+	),
+	stablePackageContract("worktree", "context-aware git worktree creation, merge transactions, and cleanup policies",
+		"Info", "CreateContext", "MergeWithResultContext", "MergeOptions", "RemoveContext", "WithAuditContext",
+	),
+	stablePackageContract("retrieval", "shared retrieval query/result contracts used by memory and vector workflows",
+		"Query", "Result",
+	),
+	stablePackageContract("permission", "central side-effect policy and audit decision contracts",
+		"Policy", "Request", "Operation", "Decision",
+	),
+	stablePackageContract("events", "lifecycle event payloads and hook runner contracts",
+		"Event", "Runner",
+	),
+	experimentalPackageContract("agent", "config-backed agent persona registry"),
+	experimentalPackageContract("agentmemory", "per-agent vector memory storage"),
+	experimentalPackageContract("artifactmerge", "session artifact aggregation and provenance helpers"),
+	experimentalPackageContract("async", "dependency-aware task planning primitives"),
+	experimentalPackageContract("autonomy", "risk-based capability levels for agent actions"),
+	experimentalPackageContract("autopilot", "orchestrator prompt rendering"),
+	experimentalPackageContract("codegraph", "dependency-free directed graph primitives for code relationships"),
+	experimentalPackageContract("codeintel", "incremental code-intelligence indexes and queries"),
+	experimentalPackageContract("config", "layered Atteler configuration loading and migration"),
+	experimentalPackageContract("contextpack", "chat-context packing and token-budget helpers"),
+	experimentalPackageContract("contextref", "local and URL context-reference expansion"),
+	experimentalPackageContract("eval", "text and structured-output evaluation helpers"),
+	experimentalPackageContract("feedback", "agent-feedback proposal application helpers"),
+	experimentalPackageContract("githistory", "git-log parsing and lexical commit search"),
+	experimentalPackageContract("incident", "incident-analysis data structures and renderers"),
+	experimentalPackageContract("lsp", "managed language-server lookups"),
+	experimentalPackageContract("mcp", "minimal Model Context Protocol request/response contracts"),
+	experimentalPackageContract("modelroute", "model routing catalogs, scoring, and telemetry"),
+	experimentalPackageContract("privacy", "conservative redaction helpers"),
+	experimentalPackageContract("promptcomplete", "deterministic prompt-line completion"),
+	experimentalPackageContract("research", "local-first research artifact creation"),
+	experimentalPackageContract("shell", "policy-gated process execution and audit records"),
+	experimentalPackageContract("skill", "skill filesystem helpers"),
+	experimentalPackageContract("sourcepolicy", "harness source-policy discovery"),
+	experimentalPackageContract("speculate", "multi-branch speculation planning"),
+	experimentalPackageContract("subagent", "bounded concurrent child-agent spawning primitives"),
+	experimentalPackageContract("symphony", "Symphony scheduler client and workflow helpers"),
+	experimentalPackageContract("tasklist", "JSON-backed task list for agents"),
+	experimentalPackageContract("vector", "local vector indexing and search"),
+	experimentalPackageContract("watch", "repository quality scan heuristics and gates"),
 }
 
 // APIContract returns the current machine-readable SDK compatibility contract.
@@ -112,7 +158,13 @@ func APIContract() Contract {
 
 // PackageContracts returns a copy of Atteler's SDK compatibility table.
 func PackageContracts() []PackageContract {
-	return append([]PackageContract(nil), packageContracts...)
+	out := make([]PackageContract, len(packageContracts))
+	for i := range packageContracts {
+		out[i] = packageContracts[i]
+		out[i].PrimaryIdentifiers = append([]string(nil), packageContracts[i].PrimaryIdentifiers...)
+	}
+
+	return out
 }
 
 // PackagesByStability returns SDK contracts matching stability.
