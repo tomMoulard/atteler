@@ -53,10 +53,10 @@ func ExampleNewProviderRegistry() {
 func ExamplePackageContracts() {
 	contracts := sdk.PackageContracts()
 
-	fmt.Println(contracts[0].ImportPath, contracts[0].Stability)
+	fmt.Println(contracts[0].ImportPath, contracts[0].Stability, contracts[0].PrimaryIdentifiers[0])
 
 	// Output:
-	// github.com/tommoulard/atteler/pkg/sdk stable
+	// github.com/tommoulard/atteler/pkg/sdk stable RunOneShotChat
 }
 
 func ExamplePackagesByStability() {
