@@ -58,6 +58,16 @@ func ExamplePackageContracts() {
 	// github.com/tommoulard/atteler/pkg/sdk stable
 }
 
+func ExamplePackagesByStability() {
+	stable := sdk.PackagesByStability(sdk.StabilityStable)
+	experimental := sdk.PackagesByStability(sdk.StabilityExperimental)
+
+	fmt.Println(stable[0].Stability, experimental[0].Stability)
+
+	// Output:
+	// stable experimental
+}
+
 func ExampleAPIContract() {
 	contract := sdk.APIContract()
 
