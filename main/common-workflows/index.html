@@ -641,6 +641,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#local-first-issue-watch" class="md-nav__link">
+    <span class="md-ellipsis">
+      Local-first issue watch
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#continuous-watch-and-incidents" class="md-nav__link">
     <span class="md-ellipsis">
       Continuous watch and incidents
@@ -1016,6 +1025,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#local-first-issue-watch" class="md-nav__link">
+    <span class="md-ellipsis">
+      Local-first issue watch
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#continuous-watch-and-incidents" class="md-nav__link">
     <span class="md-ellipsis">
       Continuous watch and incidents
@@ -1271,19 +1289,55 @@ possible. Evidence can include URLs, documentation links, repository files,
 command output, tests, logs, or prior session artifacts. This improves
 reliability and makes research easier to audit, but evidence is not mandatory
 for every statement.</p>
+<h2 id="local-first-issue-watch">Local-first issue watch<a class="headerlink" href="#local-first-issue-watch" title="Permanent link">&para;</a></h2>
+<p>Watch GitHub issues by repository and label, then prepare reviewable local
+implementation attempts without publishing anything:</p>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>atteler<span class="w"> </span>issue<span class="w"> </span>watch<span class="w"> </span>--github<span class="w"> </span>owner/repo<span class="w"> </span>--label<span class="w"> </span>atteler-agent<span class="w"> </span>--once
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>atteler<span class="w"> </span>issue<span class="w"> </span>watch<span class="w"> </span>--github<span class="w"> </span>owner/repo<span class="w"> </span>--label<span class="w"> </span>ready-for-ai<span class="w"> </span>--dry-run
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>atteler<span class="w"> </span>issue<span class="w"> </span>watch<span class="w"> </span>--github<span class="w"> </span>owner/repo<span class="w"> </span>--label<span class="w"> </span>atteler-agent<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">  </span>--command<span class="w"> </span><span class="s1">&#39;atteler --once &quot;Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish.&quot;&#39;</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">  </span>--validation-command<span class="w"> </span><span class="s2">&quot;go test ./...&quot;</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">  </span>--once
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>atteler<span class="w"> </span>issue<span class="w"> </span>list-candidates<span class="w"> </span>--github<span class="w"> </span>owner/repo<span class="w"> </span>--label<span class="w"> </span>ready-for-ai
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>atteler<span class="w"> </span>issue<span class="w"> </span>run<span class="w"> </span><span class="m">232</span><span class="w"> </span>--github<span class="w"> </span>owner/repo
+</span></code></pre></div>
+<p><code>issue list-candidates</code> is a dry-run alias for reviewing the same eligible set; <code>issue run &lt;issue-ref&gt;</code> prepares one issue directly. <code>issue watch</code> is local-first by default. It may read GitHub issue metadata,
+create a local git worktree, and write artifacts under
+<code>.atteler/runs/issues/&lt;issue-id&gt;/&lt;run-id&gt;/</code>; it does not push branches, open
+pull requests, or post tracker comments. Duplicate runs are avoided with
+<code>.atteler/issue-watch/state.json</code>.</p>
+<p>When <code>--command</code> is provided, issue watch runs that local command inside each
+isolated worktree. Any <code>--validation-command</code> values run afterward in the same
+worktree, and their bounded stdout/stderr plus the refreshed git diff are stored
+in the run artifacts. These command hooks remain local-only: direct network and
+credential-access operations are denied, and publishing still requires a
+separate explicit workflow. Commands receive environment variables pointing at
+the generated context, including <code>ATTELER_ISSUE_WATCH_PLAN</code>,
+<code>ATTELER_ISSUE_WATCH_ISSUE_JSON</code>, <code>ATTELER_ISSUE_WATCH_RUN_DIR</code>, and
+<code>ATTELER_ISSUE_WATCH_PATCH</code>. Nested <code>atteler issue implement --open-pr</code> calls
+are refused while running under issue watch; publish separately after reviewing
+the local artifacts. Nested Atteler bash tools also deny shell-network commands
+such as <code>curl</code>, <code>gh</code>, or <code>git push</code> while <code>ATTELER_ISSUE_WATCH=1</code>.</p>
+<p>Each prepared run includes <code>issue.json</code>, <code>plan.md</code>, <code>implementation.md</code>,
+<code>validation.log</code>, <code>patch.diff</code>, and <code>run.json</code>. The plan calls out discovered
+repository/harness instructions such as <code>AGENTS.md</code>, <code>CLAUDE.md</code>,
+<code>.cursor/rules/*</code>, <code>.cursorrules</code>, <code>CODEX.md</code>, <code>GEMINI.md</code>, and GitHub Copilot
+instructions when present. Reports should include evidence such as changed
+files, tests run, command output, validation status, and issue metadata whenever
+available.</p>
 <h2 id="continuous-watch-and-incidents">Continuous watch and incidents<a class="headerlink" href="#continuous-watch-and-incidents" title="Permanent link">&para;</a></h2>
 <p>Scan the working tree for quality debt on demand, as JSON, or in a loop. Watch
 findings can upsert deduplicated GitHub issues. <code>incident diagnose</code> normalizes
 incident context from Sentry, a redacted JSON fixture, or an MCP connector.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>atteler<span class="w"> </span>watch<span class="w"> </span>scan
-</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>atteler<span class="w"> </span>watch<span class="w"> </span>json
-</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>atteler<span class="w"> </span>watch<span class="w"> </span>loop
-</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912
-</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-file<span class="w"> </span>redacted-sentry-event.json
-</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">  </span>--incident-apply-fix<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">  </span>--incident-validation-command<span class="w"> </span><span class="s2">&quot;go test ./pkg/auth&quot;</span><span class="w"> </span><span class="se">\</span>
-</span><span id="__span-11-9"><a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="w">  </span>--incident-open-pr
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>atteler<span class="w"> </span>watch<span class="w"> </span>scan
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>atteler<span class="w"> </span>watch<span class="w"> </span>json
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>atteler<span class="w"> </span>watch<span class="w"> </span>loop
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912
+</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-file<span class="w"> </span>redacted-sentry-event.json
+</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--sentry<span class="w"> </span>ISSUE-912<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="w">  </span>--incident-apply-fix<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="w">  </span>--incident-validation-command<span class="w"> </span><span class="s2">&quot;go test ./pkg/auth&quot;</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-12-9"><a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="w">  </span>--incident-open-pr
 </span></code></pre></div>
 <p>The <code>--incident-apply-fix</code> switch is an explicit approval gate for the
 credentialed repair loop; PR creation requires it plus at least one captured
@@ -1292,14 +1346,14 @@ validation command.</p>
 <p>Search lexical memory or vector indexes, and query the language-neutral
 workspace code index. Lexical vector mode is a deterministic fallback (not
 semantic); embedding mode uses an Ollama-compatible endpoint.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>atteler<span class="w"> </span>memory<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span>
-</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--retrieval-explain
-</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--trusted-source<span class="w"> </span>docs.github.com<span class="w"> </span>--deny-source<span class="w"> </span>example-content-farm.com
-</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>atteler<span class="w"> </span>memory<span class="w"> </span>vector-search<span class="w"> </span><span class="s2">&quot;redirect risks&quot;</span><span class="w"> </span>--vector-index<span class="w"> </span>docs/research.md<span class="w"> </span>--vectorizer<span class="w"> </span>lexical
-</span><span id="__span-12-5"><a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>atteler<span class="w"> </span>memory<span class="w"> </span>migrate
-</span><span id="__span-12-6"><a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>summary<span class="w"> </span>--json
-</span><span id="__span-12-7"><a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>symbol<span class="w"> </span>NewRegistry
-</span><span id="__span-12-8"><a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>query<span class="w"> </span>definitions:NewRegistry
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>atteler<span class="w"> </span>memory<span class="w"> </span>search<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span>
+</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--retrieval-explain
+</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>atteler<span class="w"> </span>memory<span class="w"> </span>retrieve<span class="w"> </span><span class="s2">&quot;OAuth retry storm&quot;</span><span class="w"> </span>--trusted-source<span class="w"> </span>docs.github.com<span class="w"> </span>--deny-source<span class="w"> </span>example-content-farm.com
+</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>atteler<span class="w"> </span>memory<span class="w"> </span>vector-search<span class="w"> </span><span class="s2">&quot;redirect risks&quot;</span><span class="w"> </span>--vector-index<span class="w"> </span>docs/research.md<span class="w"> </span>--vectorizer<span class="w"> </span>lexical
+</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>atteler<span class="w"> </span>memory<span class="w"> </span>migrate
+</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>summary<span class="w"> </span>--json
+</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>symbol<span class="w"> </span>NewRegistry
+</span><span id="__span-13-8"><a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>atteler<span class="w"> </span>code-intel<span class="w"> </span>query<span class="w"> </span>definitions:NewRegistry
 </span></code></pre></div>
 <p>Run <code>atteler memory migrate</code> / <code>agent-migrate</code> after changing a store schema,
 redaction policy, or vectorizer. Vectorizer settings are scoped per store,
@@ -1314,13 +1368,13 @@ includes a <code>source_warning</code> field for weak evidence.</p>
 manifests. Inspect and run entrypoints, using <code>--plugin-dry-run</code> to check the
 policy envelope before execution. MCP servers are referenced through manifests
 (for example by <code>incident diagnose</code>).</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>list
-</span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>describe<span class="w"> </span>reviewer
-</span><span id="__span-13-3"><a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>run<span class="w"> </span>reviewer/check<span class="w"> </span>--plugin-dry-run
-</span><span id="__span-13-4"><a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-ref<span class="w"> </span>alert-42<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-13-5"><a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="w">  </span>--incident-mcp-manifest<span class="w"> </span>.atteler/mcp.yaml<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-13-6"><a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="w">  </span>--incident-mcp-server<span class="w"> </span>grafana<span class="w"> </span><span class="se">\</span>
-</span><span id="__span-13-7"><a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="w">  </span>--incident-mcp-tool<span class="w"> </span>get_incident
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>list
+</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>describe<span class="w"> </span>reviewer
+</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>atteler<span class="w"> </span>plugins<span class="w"> </span>run<span class="w"> </span>reviewer/check<span class="w"> </span>--plugin-dry-run
+</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>atteler<span class="w"> </span>incident<span class="w"> </span>diagnose<span class="w"> </span>--incident-ref<span class="w"> </span>alert-42<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-14-5"><a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="w">  </span>--incident-mcp-manifest<span class="w"> </span>.atteler/mcp.yaml<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-14-6"><a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="w">  </span>--incident-mcp-server<span class="w"> </span>grafana<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-14-7"><a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="w">  </span>--incident-mcp-tool<span class="w"> </span>get_incident
 </span></code></pre></div>
 <p>Plugin runs require an accepted local policy that acts as an upper bound;
 manifests requesting anything outside it fail before execution.</p>
@@ -1328,19 +1382,19 @@ manifests requesting anything outside it fail before execution.</p>
 <p>Suggest a skill from repeated steps, then review the generated diff before
 saving. Automatic skill learning records redacted workflow observations and
 writes generated skills under <code>.atteler/skills/generated/</code>.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-suggest<span class="w"> </span>plan<span class="w"> </span>--skill-step<span class="w"> </span>code<span class="w"> </span>--skill-step<span class="w"> </span><span class="nb">test</span>
-</span><span id="__span-14-2"><a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-list
-</span><span id="__span-14-3"><a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-show<span class="w"> </span>k8s-investigation
-</span><span id="__span-14-4"><a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-disable<span class="w"> </span>k8s-investigation
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-suggest<span class="w"> </span>plan<span class="w"> </span>--skill-step<span class="w"> </span>code<span class="w"> </span>--skill-step<span class="w"> </span><span class="nb">test</span>
+</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-list
+</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-show<span class="w"> </span>k8s-investigation
+</span><span id="__span-15-4"><a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>atteler<span class="w"> </span>agents<span class="w"> </span>skill-learning-disable<span class="w"> </span>k8s-investigation
 </span></code></pre></div>
 <p>Use <code>--skill-review-only</code> to inspect the diff without writing files. Disable
 learning with <code>skill_learning.enabled: false</code> or <code>ATTELER_SKILL_LEARNING=false</code>.</p>
 <h2 id="export-and-share-sessions">Export and share sessions<a class="headerlink" href="#export-and-share-sessions" title="Permanent link">&para;</a></h2>
 <p>Exports default to the redacted shareable profile; credential patterns and
 local absolute paths are scrubbed and a provenance manifest is included.</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>markdown
-</span><span id="__span-15-2"><a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>issue
-</span><span id="__span-15-3"><a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>private-markdown
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-16-1"><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>markdown
+</span><span id="__span-16-2"><a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>issue
+</span><span id="__span-16-3"><a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>atteler<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="m">20260430</span>-120000-deadbeef<span class="w"> </span>--export-format<span class="w"> </span>private-markdown
 </span></code></pre></div>
 <p>Use <code>private-markdown</code> or <code>private-json</code> only when recipients may see the full
 raw session.</p>
