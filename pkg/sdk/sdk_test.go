@@ -156,6 +156,50 @@ func TestNewProviderRegistry_RejectsEmptyProviderName(t *testing.T) {
 	assert.Contains(t, err.Error(), "provider 0 has empty name")
 }
 
+func TestFacadeWorkflows_RejectMissingRequiredInputs(t *testing.T) {
+	t.Parallel()
+
+	//nolint:staticcheck // Verifies the SDK facade's nil-context guard.
+	_, err := sdk.RunOneShotChat(nil, sdk.OneShotChatOptions{})
+	require.ErrorIs(t, err, llm.ErrContextRequired)
+
+	_, err = sdk.RunOneShotChat(t.Context(), sdk.OneShotChatOptions{Prompt: "hello"})
+	require.ErrorContains(t, err, "chat registry is required")
+
+	registry, registryErr := sdk.NewProviderRegistry(fakeProvider{name: "fake", models: []string{"fake-model"}})
+	require.NoError(t, registryErr)
+
+	_, err = sdk.RunOneShotChat(t.Context(), sdk.OneShotChatOptions{Registry: registry, Prompt: " \t"})
+	require.ErrorContains(t, err, "chat prompt is required")
+
+	_, err = sdk.RunOneShotChat(t.Context(), sdk.OneShotChatOptions{
+		Registry:    registry,
+		Prompt:      "hello",
+		SaveSession: true,
+	})
+	require.ErrorContains(t, err, "session store is required")
+
+	err = sdk.SaveSession(nil, session.Session{})
+	require.ErrorContains(t, err, "session store is required")
+
+	_, err = sdk.SearchMemory(nil, "query", 1)
+	require.ErrorContains(t, err, "memory store is required")
+
+	//nolint:staticcheck // Verifies the SDK facade's nil-context guard.
+	_, err = sdk.RunPlugin(nil, sdk.PluginRunOptions{})
+	require.ErrorIs(t, err, llm.ErrContextRequired)
+
+	_, err = sdk.RunPlugin(t.Context(), sdk.PluginRunOptions{})
+	require.ErrorContains(t, err, "plugin policy is required")
+
+	_, err = sdk.AttachNewWorktree(t.Context(), t.TempDir(), nil)
+	require.ErrorContains(t, err, "session is required")
+
+	emptySession := session.Session{}
+	_, err = sdk.AttachNewWorktree(t.Context(), t.TempDir(), &emptySession)
+	require.ErrorContains(t, err, "session id is required")
+}
+
 func TestBuildMemoryIndex_SearchesDocuments(t *testing.T) {
 	t.Parallel()
 
