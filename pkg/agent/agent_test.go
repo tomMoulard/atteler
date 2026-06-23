@@ -474,6 +474,31 @@ func TestAgent_HasToolPermission_AllowAllCompatibilityMode(t *testing.T) {
 	assert.False(t, a.HasToolPermission("bash"), "explicit capability false should override compatibility allow-all")
 }
 
+func TestAgent_HasToolPermission_ExplicitCapabilityDeniesOverrideRawAllows(t *testing.T) {
+	t.Parallel()
+
+	a := Agent{
+		Name: "conflicted",
+		ToolPermissions: map[string]bool{
+			llm.ToolNameBash:     true,
+			"shell.write":        false,
+			llm.ToolNameWrite:    true,
+			"filesystem.write":   false,
+			llm.ToolNameGrep:     true,
+			"search":             false,
+			llm.ToolNameGlob:     true,
+			"read":               false,
+			"future-raw-allowed": true,
+		},
+	}
+
+	assert.False(t, a.HasToolPermission(llm.ToolNameBash), "shell.write=false should deny raw bash=true")
+	assert.False(t, a.HasToolPermission(llm.ToolNameWrite), "filesystem.write=false should deny raw write=true")
+	assert.False(t, a.HasToolPermission(llm.ToolNameGrep), "search=false should deny raw grep=true")
+	assert.False(t, a.HasToolPermission(llm.ToolNameGlob), "read=false should deny raw glob=true")
+	assert.True(t, a.HasToolPermission("future-raw-allowed"), "unrelated raw allows should still work")
+}
+
 func TestAgent_ToolPolicy_ShellReadOnlyDeniesMutatingCommand(t *testing.T) {
 	t.Parallel()
 

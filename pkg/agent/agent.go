@@ -173,6 +173,10 @@ func toolAllowedByPermissions(tool string, permissions map[string]bool) bool {
 		return false
 	}
 
+	if toolDeniedByPermissions(tool, permissions) {
+		return false
+	}
+
 	if allowed, ok := permissions[tool]; ok {
 		return allowed
 	}
@@ -196,7 +200,9 @@ func toolDeniedByPermissions(tool string, permissions map[string]bool) bool {
 	}
 
 	if allowed, ok := permissions[tool]; ok {
-		return !allowed
+		if !allowed {
+			return true
+		}
 	}
 
 	for capability, allowed := range permissions {
