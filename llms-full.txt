@@ -219,6 +219,10 @@ atteler chat once "Summarize @README.md" --record-response .atteler/fixtures/rea
 atteler chat once "Summarize @README.md" --replay-response .atteler/fixtures/readme-summary.json
 ```
 
+Recorded responses under `.atteler/fixtures/*.json` are raw provider outputs and
+are ignored/private by default. Commit only reviewed, redacted fixtures renamed
+to `.atteler/fixtures/**/*.fixture.{json,yaml,yml}`.
+
 ## Run eval checks
 
 Assert against a recorded fixture or a structured eval suite. Reports are JSON
@@ -233,6 +237,9 @@ atteler eval run .atteler/evals/readme.eval.yaml \
   --eval-report .atteler/eval-report.json
 atteler eval record reviewer --evaluation-report report.json
 ```
+
+`.atteler/eval-report*.json` and ad-hoc outputs are ignored/private by default;
+commit only reviewed suites named `.atteler/evals/**/*.eval.{json,yaml,yml}`.
 
 Suites combine required/forbidden content, regex, JSON/YAML path, schema,
 numeric, artifact, exit-code, and recorded judge assertions. Judge assertions
@@ -359,7 +366,8 @@ atteler research run \
 
 The MVP is local-first. It creates `.atteler/runs/research/<run-id>/` by
 default (or the directory passed with `--output` / `--research-output`) and
-writes:
+writes ignored/private artifacts until you review and copy a redacted summary to
+a committed docs location:
 
 - `research.md` — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.
@@ -469,13 +477,16 @@ atteler incident diagnose --incident-ref alert-42 \
 ```
 
 Plugin runs require an accepted local policy that acts as an upper bound;
-manifests requesting anything outside it fail before execution.
+manifests requesting anything outside it fail before execution. MCP manifests
+under `.atteler/` are ignored/private by default because they can contain local
+server paths, tool arguments, or integration details.
 
 ## Synthesize and manage skills
 
 Suggest a skill from repeated steps, then review the generated diff before
 saving. Automatic skill learning records redacted workflow observations and
-writes generated skills under `.atteler/skills/generated/`.
+writes ignored/private generated skills under `.atteler/skills/generated/`.
+Commit only reviewed skills copied to `.atteler/skills/curated/`.
 
 ```sh
 atteler agents skill-suggest plan --skill-step code --skill-step test
@@ -540,7 +551,10 @@ Layers load lowest precedence first; later layers override earlier ones:
 2. **Global config** — `$XDG_CONFIG_HOME/atteler/config.{yaml,yml,json}` (or
    `~/.config/atteler/...`).
 3. **Project config** — `./.atteler/config.{yaml,yml,json}`, then
-   `./.atteler.{yaml,yml,json}`.
+   `./.atteler.{yaml,yml,json}`. The `.atteler/config.*` form is
+   ignored/private by this repository's artifact policy; use root
+   `./.atteler.yaml`, `./.atteler.yml`, or `./.atteler.json` for reviewed
+   shared config.
 4. **`ATTELER_CONFIG` / `--config`** — extra files (platform path-list
    separator); highest-precedence config files.
 5. **Runtime choices** — persisted state, CLI flags (`--model`, generation
@@ -5084,7 +5098,7 @@ atteler --incident-file <value>
 
 ### `--incident-mcp-manifest`
 
-MCP manifest YAML/JSON containing an observability incident tool
+MCP manifest YAML/JSON containing an observability incident tool; repo-local .atteler manifests are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -5139,7 +5153,7 @@ atteler --incident-open-pr
 
 ### `--incident-pr-body`
 
-Write a redacted PR body template for the diagnosed incident
+Write a redacted PR body template for the diagnosed incident; repo-local .atteler drafts are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -5161,7 +5175,7 @@ atteler --incident-ref <value>
 
 ### `--incident-report`
 
-Write the redacted incident diagnosis report to this path
+Write the redacted incident diagnosis report to this path; repo-local .atteler reports are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -5258,7 +5272,7 @@ atteler --init-config <value>
 
 ### `--init-rtk-plugin`
 
-Write an RTK plugin scaffold to this directory and exit
+Write an RTK plugin scaffold to this directory and exit; repo-local .atteler/plugins scaffolds are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -5606,7 +5620,7 @@ atteler --mcp-capability <value>
 
 ### `--mcp-manifest`
 
-Validate/list or invoke an MCP manifest YAML/JSON file and exit
+Validate/list or invoke an MCP manifest YAML/JSON file and exit; repo-local .atteler manifests are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -6733,7 +6747,7 @@ atteler --skill-learning-delete <value>
 
 ### `--skill-learning-dir`
 
-Automatic skill learning state directory
+Automatic skill learning state directory; repo-local .atteler/skill-learning is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -6821,7 +6835,7 @@ atteler --skill-learning-show <value>
 
 ### `--skill-learning-skill-dir`
 
-Directory containing automatically generated skills
+Directory containing automatically generated skills; repo-local .atteler/skills/generated is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -6863,7 +6877,7 @@ atteler --skill-review-only
 
 ### `--skill-save-dir`
 
-Persist accepted --skill-step suggestion as a reviewed skill directory
+Persist accepted --skill-step suggestion as a reviewed skill directory; use .atteler/skills/curated for committed skills
 
 - **Type:** string
 - **Default:** `""`
@@ -7929,8 +7943,9 @@ and thread-safe — the registry creates instances on demand. See
 
 ## Configuration
 
-YAML config is layered (XDG global → `./.atteler/` → `./.atteler.{yaml,yml}` →
-`ATTELER_CONFIG` paths), with lower-precedence defaults imported from sibling
+YAML config is layered (XDG global → ignored/private `./.atteler/config.*` →
+reviewable `./.atteler.{yaml,yml}` → `ATTELER_CONFIG` paths), with
+lower-precedence defaults imported from sibling
 harnesses such as `~/.codex/config.toml`, `~/.claude/settings.json`, OpenCode
 config, and Forge `.forge.toml`. Generation knobs layer global `generation:` →
 per-agent → CLI overrides, and omitted values are not sent to providers. Full

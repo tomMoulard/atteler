@@ -1842,7 +1842,7 @@ atteler --incident-file <value>
 
 ### `--incident-mcp-manifest`
 
-MCP manifest YAML/JSON containing an observability incident tool
+MCP manifest YAML/JSON containing an observability incident tool; repo-local .atteler manifests are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -1897,7 +1897,7 @@ atteler --incident-open-pr
 
 ### `--incident-pr-body`
 
-Write a redacted PR body template for the diagnosed incident
+Write a redacted PR body template for the diagnosed incident; repo-local .atteler drafts are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -1919,7 +1919,7 @@ atteler --incident-ref <value>
 
 ### `--incident-report`
 
-Write the redacted incident diagnosis report to this path
+Write the redacted incident diagnosis report to this path; repo-local .atteler reports are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -2016,7 +2016,7 @@ atteler --init-config <value>
 
 ### `--init-rtk-plugin`
 
-Write an RTK plugin scaffold to this directory and exit
+Write an RTK plugin scaffold to this directory and exit; repo-local .atteler/plugins scaffolds are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -2364,7 +2364,7 @@ atteler --mcp-capability <value>
 
 ### `--mcp-manifest`
 
-Validate/list or invoke an MCP manifest YAML/JSON file and exit
+Validate/list or invoke an MCP manifest YAML/JSON file and exit; repo-local .atteler manifests are ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -3491,7 +3491,7 @@ atteler --skill-learning-delete <value>
 
 ### `--skill-learning-dir`
 
-Automatic skill learning state directory
+Automatic skill learning state directory; repo-local .atteler/skill-learning is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -3579,7 +3579,7 @@ atteler --skill-learning-show <value>
 
 ### `--skill-learning-skill-dir`
 
-Directory containing automatically generated skills
+Directory containing automatically generated skills; repo-local .atteler/skills/generated is ignored/private by default
 
 - **Type:** string
 - **Default:** `""`
@@ -3621,7 +3621,7 @@ atteler --skill-review-only
 
 ### `--skill-save-dir`
 
-Persist accepted --skill-step suggestion as a reviewed skill directory
+Persist accepted --skill-step suggestion as a reviewed skill directory; use .atteler/skills/curated for committed skills
 
 - **Type:** string
 - **Default:** `""`

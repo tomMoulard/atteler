@@ -1154,11 +1154,18 @@ func TestCLIFlagHelpMarksPrivateAttelerDefaults(t *testing.T) {
 	for _, name := range []string{
 		"research-output",
 		"eval-report",
+		"incident-mcp-manifest",
+		"incident-pr-body",
+		"incident-report",
+		"init-rtk-plugin",
+		"mcp-manifest",
 		"task-file",
 		"memory-store",
 		"agent-memory-store",
 		"vector-store",
 		"spawn-ledger",
+		"skill-learning-dir",
+		"skill-learning-skill-dir",
 		"merge-artifacts",
 		"record-response",
 	} {
