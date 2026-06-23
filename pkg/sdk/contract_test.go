@@ -136,6 +136,19 @@ func TestPackageContracts_PrimaryIdentifiersAreDocumented(t *testing.T) {
 	}
 }
 
+func TestPackageContracts_PrimaryIdentifiersExistInPackages(t *testing.T) {
+	t.Parallel()
+
+	for _, contract := range sdk.PackagesByStability(sdk.StabilityStable) {
+		packagePath := shortPackagePath(contract.ImportPath)
+		identifiers := exportedPackageIdentifiers(t, packagePath)
+
+		for _, identifier := range contract.PrimaryIdentifiers {
+			assert.Contains(t, identifiers, identifier, "%s should export primary identifier %s", packagePath, identifier)
+		}
+	}
+}
+
 func TestAPIContract_JSONContractUsesStableEnvelope(t *testing.T) {
 	t.Parallel()
 
@@ -342,6 +355,49 @@ func exportedSDKIdentifiers(t *testing.T) []string {
 	sort.Strings(names)
 
 	return names
+}
+
+func exportedPackageIdentifiers(t *testing.T, packagePath string) map[string]struct{} {
+	t.Helper()
+
+	identifiers := make(map[string]struct{})
+	root := filepath.Join(repoRoot(t), packagePath)
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+
+		file := parseGoFile(t, filepath.Join(root, entry.Name()))
+		for _, decl := range file.Decls {
+			switch decl := decl.(type) {
+			case *ast.GenDecl:
+				for _, spec := range decl.Specs {
+					switch spec := spec.(type) {
+					case *ast.TypeSpec:
+						if ast.IsExported(spec.Name.Name) {
+							identifiers[spec.Name.Name] = struct{}{}
+						}
+					case *ast.ValueSpec:
+						for _, name := range spec.Names {
+							if ast.IsExported(name.Name) {
+								identifiers[name.Name] = struct{}{}
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if ast.IsExported(decl.Name.Name) {
+					identifiers[decl.Name.Name] = struct{}{}
+				}
+			}
+		}
+	}
+
+	return identifiers
 }
 
 func parseGoFile(t *testing.T, path string) *ast.File {
