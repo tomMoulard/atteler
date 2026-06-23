@@ -688,6 +688,51 @@ func TestRunOnceBlocksPullRequestCreationLocalWorkflowByDefault(t *testing.T) {
 	assert.Equal(t, statusFailed, state.Runs["node-12"].Status)
 }
 
+func TestRunOnceBlocksTrackerCommentLocalWorkflowByDefault(t *testing.T) {
+	root := initIssueWatchRepo(t)
+	t.Setenv(worktree.EnvDir, filepath.Join(t.TempDir(), "worktrees"))
+
+	tracker := fakeTracker{issues: []symphony.Issue{{
+		ID:         "node-13",
+		Identifier: "GH-13",
+		Title:      "tracker comment safety",
+		State:      "OPEN",
+		Labels:     []string{"atteler-agent"},
+	}}}
+
+	result, err := RunOnce(t.Context(), Options{
+		Root:               root,
+		Repository:         "owner/repo",
+		Labels:             []string{"atteler-agent"},
+		Tracker:            tracker,
+		Command:            "gh issue comment 13 --body published > tracker-comment-posted",
+		ValidationCommands: []string{"printf 'should-not-run\\n'"},
+		Now:                fixedIssueWatchNow,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Runs, 1)
+
+	run := result.Runs[0]
+	assert.Equal(t, statusFailed, run.Status)
+	assert.True(t, run.Workflow.Run)
+	require.NotNil(t, run.Workflow.Result)
+	assert.False(t, run.Workflow.Result.Passed)
+	assert.Contains(t, run.Workflow.Result.Error, "permission.")
+	assert.False(t, run.Validation.Run)
+	assert.NoFileExists(t, filepath.Join(run.WorktreePath, "tracker-comment-posted"))
+
+	logData, err := os.ReadFile(run.Artifacts.ValidationLog)
+	require.NoError(t, err)
+
+	log := string(logData)
+	assert.Contains(t, log, "permission.")
+	assert.NotContains(t, log, "should-not-run")
+
+	state, err := LoadState(filepath.Join(root, defaultStatePath))
+	require.NoError(t, err)
+	assert.Equal(t, statusFailed, state.Runs["node-13"].Status)
+}
+
 func TestDiscoverGuidanceFindsHarnessInstructionFiles(t *testing.T) {
 	t.Parallel()
 
