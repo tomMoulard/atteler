@@ -172,6 +172,8 @@ func saveRecordedResponse(ctx context.Context, path string, params llm.CompleteP
 		return fmt.Errorf("record response: write %s: %w", path, err)
 	}
 
+	printAttelerArtifactPrivacyHint(path)
+
 	return nil
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1783,4 +1784,62 @@ func writeWatchScanTestFile(t *testing.T, root, path, content string) {
 	fullPath := filepath.Join(root, path)
 	require.NoError(t, os.MkdirAll(filepath.Dir(fullPath), 0o750))
 	require.NoError(t, os.WriteFile(fullPath, []byte(content), 0o600))
+}
+
+//nolint:paralleltest // Captures process stdout while task mutation prints the user-facing privacy hint.
+func TestRunTaskListCommand_PrintsPrivacyHintForDefaultAttelerTaskFile(t *testing.T) {
+	root := t.TempDir()
+	taskFile := filepath.Join(root, ".atteler", "tasks.json")
+
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = writer
+
+	t.Cleanup(func() {
+		os.Stdout = original
+		_ = reader.Close()
+	})
+
+	err = runTaskListCommandWithAutonomy(context.Background(), nil, taskCommandInput{
+		FilePath: taskFile,
+		AddTitle: "review local artifact policy",
+	}, autonomy.Medium)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	os.Stdout = original
+
+	data, err := os.ReadFile(taskFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "review local artifact policy")
+
+	out, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "id=")
+	assert.Contains(t, string(out), "privacy_hint=")
+	assert.Contains(t, string(out), "ignored/private by default")
+	assert.Contains(t, string(out), "review and redact")
+}
+
+func TestFormatAsyncRunResults_PrintsPrivacyHintForAttelerArtifacts(t *testing.T) {
+	t.Parallel()
+
+	got := formatAsyncRunResults([]attasync.TaskResult{{
+		Wave:           0,
+		Order:          0,
+		Task:           attasync.Task{ID: "plan", Agent: "planner"},
+		Status:         attasync.StatusSucceeded,
+		LedgerPath:     ".atteler/runs/async-demo/ledger.json",
+		TranscriptPath: ".atteler/runs/async-demo/plan/transcript.jsonl",
+		Artifacts:      []string{".atteler/runs/async-demo/plan.patch"},
+	}})
+
+	assert.Contains(t, got, "ledger=.atteler/runs/async-demo/ledger.json")
+	assert.Contains(t, got, "transcript=.atteler/runs/async-demo/plan/transcript.jsonl")
+	assert.Contains(t, got, "artifact=.atteler/runs/async-demo/plan.patch")
+	assert.GreaterOrEqual(t, strings.Count(got, "privacy_hint="), 3)
+	assert.Contains(t, got, "ignored/private by default")
+	assert.Contains(t, got, "review and redact")
 }

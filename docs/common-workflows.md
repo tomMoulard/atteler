@@ -50,6 +50,10 @@ atteler chat once "Summarize @README.md" --record-response .atteler/fixtures/rea
 atteler chat once "Summarize @README.md" --replay-response .atteler/fixtures/readme-summary.json
 ```
 
+Recorded responses under `.atteler/fixtures/*.json` are raw provider outputs and
+are ignored/private by default. Commit only reviewed, redacted fixtures renamed
+to `.atteler/fixtures/**/*.fixture.{json,yaml,yml}`.
+
 ## Run eval checks
 
 Assert against a recorded fixture or a structured eval suite. Reports are JSON
@@ -64,6 +68,9 @@ atteler eval run .atteler/evals/readme.eval.yaml \
   --eval-report .atteler/eval-report.json
 atteler eval record reviewer --evaluation-report report.json
 ```
+
+`.atteler/eval-report*.json` and ad-hoc outputs are ignored/private by default;
+commit only reviewed suites named `.atteler/evals/**/*.eval.{json,yaml,yml}`.
 
 Suites combine required/forbidden content, regex, JSON/YAML path, schema,
 numeric, artifact, exit-code, and recorded judge assertions. Judge assertions
@@ -190,7 +197,8 @@ atteler research run \
 
 The MVP is local-first. It creates `.atteler/runs/research/<run-id>/` by
 default (or the directory passed with `--output` / `--research-output`) and
-writes:
+writes ignored/private artifacts until you review and copy a redacted summary to
+a committed docs location:
 
 - `research.md` — human-readable summary, findings, tradeoffs,
   recommendations, risks, claims, and citations.
@@ -343,13 +351,16 @@ atteler incident diagnose --incident-ref alert-42 \
 ```
 
 Plugin runs require an accepted local policy that acts as an upper bound;
-manifests requesting anything outside it fail before execution.
+manifests requesting anything outside it fail before execution. MCP manifests
+under `.atteler/` are ignored/private by default because they can contain local
+server paths, tool arguments, or integration details.
 
 ## Synthesize and manage skills
 
 Suggest a skill from repeated steps, then review the generated diff before
 saving. Automatic skill learning records redacted workflow observations and
-writes generated skills under `.atteler/skills/generated/`.
+writes ignored/private generated skills under `.atteler/skills/generated/`.
+Commit only reviewed skills copied to `.atteler/skills/curated/`.
 
 ```sh
 atteler agents skill-suggest plan --skill-step code --skill-step test

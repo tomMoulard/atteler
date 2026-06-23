@@ -102,10 +102,11 @@ func runIncidentDiagnoseWithStateWriter(ctx context.Context, w io.Writer, state 
 		return err
 	}
 
-	artifactErr := writeIncidentArtifacts(cwd, analysis, input)
+	artifactWarnings, artifactErr := writeIncidentArtifacts(cwd, analysis, input)
 	if artifactErr != nil {
 		return artifactErr
 	}
+	analysis.Warnings = append(analysis.Warnings, artifactWarnings...)
 
 	if input.OpenPR {
 		prURL, openErr := openIncidentPR(ctx, cwd, analysis, input, timeout)
@@ -1450,19 +1451,30 @@ func (l *incidentCommandOutputLimiter) truncatedOutput() bool {
 	return l.truncated
 }
 
-func writeIncidentArtifacts(cwd string, analysis incident.Analysis, input incidentDiagnoseCommandInput) error {
+func writeIncidentArtifacts(cwd string, analysis incident.Analysis, input incidentDiagnoseCommandInput) ([]string, error) {
+	var warnings []string
 	if strings.TrimSpace(input.ReportPath) != "" {
 		if err := writeIncidentFile(cwd, input.ReportPath, incident.RenderMarkdown(analysis)); err != nil {
-			return err
+			return nil, err
 		}
+		warnings = appendAttelerArtifactPrivacyWarning(warnings, input.ReportPath)
 	}
 	if strings.TrimSpace(input.PRBodyPath) != "" {
 		if err := writeIncidentFile(cwd, input.PRBodyPath, incident.RenderMarkdown(analysis)); err != nil {
-			return err
+			return nil, err
 		}
+		warnings = appendAttelerArtifactPrivacyWarning(warnings, input.PRBodyPath)
 	}
 
-	return nil
+	return warnings, nil
+}
+
+func appendAttelerArtifactPrivacyWarning(warnings []string, path string) []string {
+	if hint, ok := attelerArtifactPrivacyHint(path); ok {
+		return append(warnings, hint)
+	}
+
+	return warnings
 }
 
 func writeIncidentFile(cwd, path, content string) error {

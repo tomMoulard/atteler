@@ -591,6 +591,7 @@ func mergeArtifacts(ctx context.Context, state appState, outputPath, outputForma
 	}
 
 	fmt.Println("Merged artifacts into " + outputPath)
+	printAttelerArtifactPrivacyHint(outputPath)
 
 	return nil
 }

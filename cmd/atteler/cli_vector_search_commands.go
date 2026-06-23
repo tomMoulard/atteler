@@ -124,6 +124,7 @@ func runVectorSearchOnce(ctx context.Context, settings vectorSearchSettings, que
 			formatVectorizerMetadata(idx.Vectorizer),
 			settings.IndexPath,
 		)
+		printAttelerArtifactPrivacyHint(settings.IndexPath)
 
 		return nil
 	}

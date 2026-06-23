@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1604,4 +1605,47 @@ func TestRollbackFeedbackGuidanceWritesConfigAndHistory(t *testing.T) {
 	assert.Contains(t, history, "status: rolled_back")
 	assert.Contains(t, history, "rollback_reason: superseded")
 	assert.Contains(t, history, "id: fg-rollback")
+}
+
+//nolint:paralleltest // Captures process stdout while mergeArtifacts prints the user-facing privacy hint.
+func TestMergeArtifacts_PrintsPrivacyHintForAttelerOutput(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "research.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("research notes"), 0o600))
+
+	outputPath := filepath.Join(dir, ".atteler", "merged-artifacts.md")
+	state := appState{
+		cwd:           dir,
+		sessionState:  session.New("gpt-test", nil),
+		selectedAgent: "reviewer",
+	}
+	assert.True(t, state.sessionState.RecordArtifact("research.md", "research", "notes", "reviewer"))
+
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = writer
+
+	t.Cleanup(func() {
+		os.Stdout = original
+		_ = reader.Close()
+	})
+
+	err = mergeArtifacts(t.Context(), state, outputPath, "markdown", 1024)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	os.Stdout = original
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "# Merged Artifacts")
+
+	out, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "Merged artifacts into "+outputPath)
+	assert.Contains(t, string(out), "privacy_hint=")
+	assert.Contains(t, string(out), "ignored/private by default")
+	assert.Contains(t, string(out), "review and redact")
 }

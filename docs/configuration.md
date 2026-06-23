@@ -25,7 +25,10 @@ Layers load lowest precedence first; later layers override earlier ones:
 2. **Global config** — `$XDG_CONFIG_HOME/atteler/config.{yaml,yml,json}` (or
    `~/.config/atteler/...`).
 3. **Project config** — `./.atteler/config.{yaml,yml,json}`, then
-   `./.atteler.{yaml,yml,json}`.
+   `./.atteler.{yaml,yml,json}`. The `.atteler/config.*` form is
+   ignored/private by this repository's artifact policy; use root
+   `./.atteler.yaml`, `./.atteler.yml`, or `./.atteler.json` for reviewed
+   shared config.
 4. **`ATTELER_CONFIG` / `--config`** — extra files (platform path-list
    separator); highest-precedence config files.
 5. **Runtime choices** — persisted state, CLI flags (`--model`, generation

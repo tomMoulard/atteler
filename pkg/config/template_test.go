@@ -17,6 +17,8 @@ func TestTemplateYAML(t *testing.T) {
 
 	template := TemplateYAML()
 	for _, want := range []string{
+		"Save as ~/.config/atteler/config.yaml for global config.",
+		"Use ./.atteler/config.yaml for ignored/private local config, or ./.atteler.yaml for reviewed shared config.",
 		"default_provider:",
 		"model_aliases:",
 		"models:",
