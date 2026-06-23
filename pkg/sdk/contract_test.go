@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -168,6 +169,33 @@ func TestExamplesDoNotImportCLIInternals(t *testing.T) {
 	}
 }
 
+func TestExamplesOnlyImportStableSDKPackages(t *testing.T) {
+	t.Parallel()
+
+	stableImports := make(map[string]struct{})
+	for _, contract := range sdk.PackagesByStability(sdk.StabilityStable) {
+		stableImports[contract.ImportPath] = struct{}{}
+	}
+
+	for _, dir := range documentedExampleDirs() {
+		examplePath := filepath.Join(repoRoot(t), "examples", dir, "main.go")
+		file := parseGoFile(t, examplePath)
+
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			require.NoError(t, err)
+
+			if strings.HasPrefix(importPath, "github.com/tommoulard/atteler/cmd") {
+				require.Failf(t, "example imports CLI internals", "%s imports %s", examplePath, importPath)
+			}
+
+			if strings.HasPrefix(importPath, "github.com/tommoulard/atteler/pkg/") {
+				assert.Contains(t, stableImports, importPath, "%s should only import stable SDK packages", examplePath)
+			}
+		}
+	}
+}
+
 func documentedExampleDirs() []string {
 	return []string{
 		"one-shot-chat",
@@ -210,9 +238,7 @@ func readRepoFile(t *testing.T, parts ...string) string {
 func exportedSDKIdentifiers(t *testing.T) []string {
 	t.Helper()
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join(repoRoot(t), "pkg", "sdk", "sdk.go"), nil, 0)
-	require.NoError(t, err)
+	file := parseGoFile(t, filepath.Join(repoRoot(t), "pkg", "sdk", "sdk.go"))
 
 	seen := make(map[string]struct{})
 
@@ -248,6 +274,16 @@ func exportedSDKIdentifiers(t *testing.T) []string {
 	sort.Strings(names)
 
 	return names
+}
+
+func parseGoFile(t *testing.T, path string) *ast.File {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	require.NoError(t, err)
+
+	return file
 }
 
 func repoRoot(t *testing.T) string {
