@@ -74,7 +74,7 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 	}
 
 	assert.Contains(t, policy, "raw transcripts")
-	assert.Contains(t, policy, "evals/**/*.eval.yaml")
+	assert.Contains(t, policy, "evals/**/*.eval.{json,yaml,yml}")
 }
 
 func TestAttelerArtifactPolicy_GitIgnoreResolution(t *testing.T) {
@@ -109,8 +109,10 @@ func TestAttelerArtifactPolicy_GitIgnoreResolution(t *testing.T) {
 		".atteler/README.md",
 		".atteler/fixtures/example.fixture.json",
 		".atteler/fixtures/nested/example.fixture.yaml",
+		".atteler/fixtures/nested/example.fixture.yml",
 		".atteler/evals/readme.eval.yaml",
 		".atteler/evals/nested/readme.eval.json",
+		".atteler/evals/nested/readme.eval.yml",
 		".atteler/skills/curated/foo.md",
 	} {
 		assert.False(t, gitCheckIgnored(t, path), "%s should remain reviewable", path)

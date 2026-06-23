@@ -44,7 +44,8 @@ contents.
   and latency and records why it chose what it chose.
 - **It stays out of your repo's way.** `--worktree` isolates a run in its own
   git worktree; sessions, artifacts, and multi-agent run audits are written
-  under `.atteler/` and are fully replayable without spending a token.
+  under ignored/private `.atteler/` paths and are fully replayable without
+  spending a token.
 - **Built to be inspected.** Most discovery commands are offline and
   credential-free — perfect for CI, dotfiles, and curious humans.
 

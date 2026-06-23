@@ -11,7 +11,7 @@ contain prompts, paths, credentials in logs, or machine-specific state.
 | --- | --- | --- |
 | Transient/private local state | `.atteler/sessions/`, `.atteler/runs/`, `.atteler/research/`, `.atteler/worktrees/`, `.atteler/tasks.json`, `.atteler/prompt-context-cache.json`, `.atteler/codeintel-index.json`, `.atteler/*-vector-index*.json`, `.atteler/agent-memory.json`, `.atteler/session-vector-index.json`, `.atteler/eval-report*.json`, recorded one-shot responses such as `.atteler/fixtures/once.json`, plugin scaffolds such as `.atteler/plugins/`, local MCP/config files such as `.atteler/mcp.yaml`, and incident drafts such as `.atteler/incident.md` | Ignored. Do not commit unless manually redacted and moved to a reviewed asset path. |
 | Generated-but-shareable reports | Redacted incident reports, research summaries, merged artifact bundles, eval reports prepared for review | Ignored at their default paths. Commit only after redaction, usually outside `.atteler/` or in a reviewed docs location. |
-| Intentionally committed project assets | Reviewed eval suites `.atteler/evals/**/*.eval.yaml`, redacted fixtures `.atteler/fixtures/**/*.fixture.{json,yaml,yml}`, curated skills under `.atteler/skills/curated/` | Allowed by `.gitignore` exceptions. Keep them deterministic, redacted, and small enough for review. |
+| Intentionally committed project assets | Reviewed eval suites `.atteler/evals/**/*.eval.{json,yaml,yml}`, redacted fixtures `.atteler/fixtures/**/*.fixture.{json,yaml,yml}`, curated skills under `.atteler/skills/curated/` | Allowed by `.gitignore` exceptions. Keep them deterministic, redacted, and small enough for review. |
 
 ## Review checklist before committing `.atteler/` content
 
