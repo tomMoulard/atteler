@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -389,6 +390,58 @@ func TestRunIssueWatchIterationDirectRunCreatesLocalArtifactsWithoutLabel(t *tes
 	assert.FileExists(t, run.Artifacts.Plan)
 	assert.FileExists(t, run.Artifacts.RunJSON)
 	assert.DirExists(t, run.WorktreePath)
+}
+
+func TestRunIssueWatchCommandOnceCreatesLocalRunAndExits(t *testing.T) {
+	var issueListRequests atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testIssueWatchIssuesPath:
+			issueListRequests.Add(1)
+			assert.Equal(t, http.MethodGet, r.Method)
+			assert.Equal(t, "open", r.URL.Query().Get("state"))
+			assert.Equal(t, "atteler-agent", r.URL.Query().Get("labels"))
+			writeIssueWatchTestJSON(t, w, `[{"node_id":"node-232","number":232,"title":"Once run","state":"open","body":"Run one watch iteration.","html_url":"https://github.com/owner/repo/issues/232","created_at":"2026-06-20T10:00:00Z","updated_at":"2026-06-20T10:05:00Z","labels":[{"name":"atteler-agent"}]}]`)
+		case testIssueWatchIssue232CommentsPath:
+			assert.Equal(t, http.MethodGet, r.Method)
+			writeIssueWatchTestJSON(t, w, `[]`)
+		default:
+			t.Errorf("unexpected GitHub test request %s", r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+			writeIssueWatchTestJSON(t, w, `{"message":"not found"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	root := initIssueWatchCLIRepo(t)
+	t.Chdir(root)
+	t.Setenv(worktree.EnvDir, filepath.Join(t.TempDir(), "worktrees"))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	err := runIssueWatchCommand(ctx, cliOptions{
+		issueWatchGitHub:         "owner/repo",
+		issueWatchGitHubEndpoint: server.URL,
+		issueWatchLabels:         stringListFlag{"atteler-agent"},
+		issueWatchOnce:           true,
+		issueWatchIntervalSeconds: positiveIntFlag{
+			name:  "issue-watch-interval-seconds",
+			value: 1,
+			set:   true,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(1), issueListRequests.Load())
+	assert.FileExists(t, filepath.Join(root, ".atteler", "issue-watch", "state.json"))
+
+	matches, err := filepath.Glob(filepath.Join(root, ".atteler", "runs", "issues", "GH-232", "*", "run.json"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
 }
 
 func TestRunIssueWatchIterationLocalRunUsesReadOnlyGitHubRequests(t *testing.T) {
