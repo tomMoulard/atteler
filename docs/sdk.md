@@ -41,7 +41,9 @@ The machine-readable source of the compatibility table is
 `pkg/sdk.CompatibilityPolicy`. The JSON envelope uses `schema_version`,
 `compatibility_policy`, and `packages`. Each package row uses stable snake-case
 fields: `import_path`, `stability`, `since`, `summary`, and optional
-`primary_identifiers` for stable package/type/function entry points.
+`primary_identifiers` for stable package/type/function entry points. Stable
+package rows include `primary_identifiers`; experimental rows intentionally omit
+that field until a package is promoted into the stable surface.
 
 ## Release compatibility checklist
 
