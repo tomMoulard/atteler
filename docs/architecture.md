@@ -34,8 +34,9 @@ and thread-safe — the registry creates instances on demand. See
 
 ## Configuration
 
-YAML config is layered (XDG global → `./.atteler/` → `./.atteler.{yaml,yml}` →
-`ATTELER_CONFIG` paths), with lower-precedence defaults imported from sibling
+YAML config is layered (XDG global → ignored/private `./.atteler/config.*` →
+reviewable `./.atteler.{yaml,yml}` → `ATTELER_CONFIG` paths), with
+lower-precedence defaults imported from sibling
 harnesses such as `~/.codex/config.toml`, `~/.claude/settings.json`, OpenCode
 config, and Forge `.forge.toml`. Generation knobs layer global `generation:` →
 per-agent → CLI overrides, and omitted values are not sent to providers. Full

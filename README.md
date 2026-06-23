@@ -182,12 +182,14 @@ checklist live in [`.atteler/README.md`](.atteler/README.md).
 
 - Ignored transient/private defaults include `.atteler/sessions/`,
   `.atteler/runs/`, `.atteler/research/`, `.atteler/worktrees/`,
-  `.atteler/tasks.json`, `.atteler/eval-report*.json`,
+  `.atteler/tasks.json`, `.atteler/config.{yaml,yml,json}`,
+  `.atteler/events.jsonl`, `.atteler/eval-report*.json`,
   `.atteler/codeintel-index.json`, `.atteler/*-vector-index*.json`,
-  `.atteler/agent-memory.json`, raw recorded responses such as
-  `.atteler/fixtures/once.json`, local MCP/config files such as
-  `.atteler/mcp.yaml`, plugin scaffolds such as `.atteler/plugins/`, and
-  incident drafts such as `.atteler/incident.md`.
+  `.atteler/agent-memory.json`, `.atteler/skill-learning/`, raw recorded
+  responses such as `.atteler/fixtures/once.json`, local MCP manifests such as
+  `.atteler/mcp.yaml`, plugin scaffolds such as `.atteler/plugins/`, watch
+  baselines such as `.atteler/watch-baseline.json`, and incident drafts such as
+  `.atteler/incident.md`.
 - Reviewable assets are opt-in and naming-convention based: commit structured
   eval suites as `.atteler/evals/**/*.eval.{yaml,yml,json}`, redacted fixtures
   as `.atteler/fixtures/**/*.fixture.{json,yaml,yml}`, and human-reviewed
