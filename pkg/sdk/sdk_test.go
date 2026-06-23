@@ -146,6 +146,16 @@ func TestNewProviderRegistry_RejectsNilProvider(t *testing.T) {
 	assert.Contains(t, err.Error(), "provider 0 is nil")
 }
 
+func TestNewProviderRegistry_RejectsEmptyProviderName(t *testing.T) {
+	t.Parallel()
+
+	registry, err := sdk.NewProviderRegistry(fakeProvider{name: " \t", models: []string{"fake-model"}})
+
+	require.Error(t, err)
+	assert.Nil(t, registry)
+	assert.Contains(t, err.Error(), "provider 0 has empty name")
+}
+
 func TestBuildMemoryIndex_SearchesDocuments(t *testing.T) {
 	t.Parallel()
 

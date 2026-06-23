@@ -126,6 +126,19 @@ func TestAPIContract_JSONContractUsesStableEnvelope(t *testing.T) {
 	assert.Len(t, envelope, 3)
 }
 
+func TestAPIContract_ReturnsPackageCopy(t *testing.T) {
+	t.Parallel()
+
+	contract := sdk.APIContract()
+	require.NotEmpty(t, contract.Packages)
+
+	contract.Packages[0].ImportPath = "mutated"
+
+	again := sdk.APIContract()
+	require.NotEmpty(t, again.Packages)
+	assert.NotEqual(t, "mutated", again.Packages[0].ImportPath)
+}
+
 func TestAPIContract_DocsMentionMachineReadablePolicy(t *testing.T) {
 	t.Parallel()
 
