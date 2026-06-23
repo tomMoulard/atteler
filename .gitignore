@@ -38,6 +38,15 @@
 # Nested/generated Atteler stores that can appear below package working dirs.
 **/.atteler/workspace-vector-index*.json
 **/.atteler/codeintel-index*.json
+**/.atteler/agent-memory.json
+**/.atteler/session-vector-index*.json
+**/.atteler/git-history-vector-index*.json
+**/.atteler/adr-vector-index*.json
+**/.atteler/vector-index*.json
+**/.atteler/.agent-memory-*.tmp
+**/.atteler/.vector-index-*.tmp
+**/.atteler/.vector-store-*.tmp
+**/.atteler/.state-*.json
 cmd/atteler/.atteler/
 /.symphony/workspaces/
 

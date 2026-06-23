@@ -34,6 +34,12 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 		"/.atteler/fixtures/*",
 		"/.atteler/evals/*",
 		"/.atteler/skills/*",
+		"**/.atteler/agent-memory.json",
+		"**/.atteler/vector-index*.json",
+		"**/.atteler/.agent-memory-*.tmp",
+		"**/.atteler/.vector-index-*.tmp",
+		"**/.atteler/.vector-store-*.tmp",
+		"**/.atteler/.state-*.json",
 	} {
 		assert.Contains(t, gitignore, privatePath)
 	}
@@ -64,6 +70,7 @@ func TestAttelerArtifactPolicy_DocsAndGitignoreAgree(t *testing.T) {
 		".atteler/eval-report*.json",
 		".atteler/codeintel-index.json",
 		".atteler/agent-memory.json",
+		"nested `.atteler/` memory/vector temp files",
 		".atteler/skill-learning/",
 		".atteler/fixtures/once.json",
 		".atteler/mcp.yaml",
@@ -122,6 +129,16 @@ func TestAttelerArtifactPolicy_GitIgnoreResolution(t *testing.T) {
 		".atteler/watch-baseline.json",
 		".atteler/incident.md",
 		".atteler/skills/generated/foo/SKILL.md",
+		"pkg/foo/.atteler/agent-memory.json",
+		"pkg/foo/.atteler/vector-index.json",
+		"pkg/foo/.atteler/vector-index.lexical.json",
+		"pkg/foo/.atteler/session-vector-index.json",
+		"pkg/foo/.atteler/git-history-vector-index.json",
+		"pkg/foo/.atteler/adr-vector-index.json",
+		"pkg/foo/.atteler/.agent-memory-123.tmp",
+		"pkg/foo/.atteler/.vector-index-123.tmp",
+		"pkg/foo/.atteler/.vector-store-123.tmp",
+		"pkg/foo/.atteler/.state-123.json",
 	} {
 		assert.True(t, gitCheckIgnored(t, path), "%s should stay ignored/private", path)
 	}

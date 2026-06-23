@@ -186,7 +186,8 @@ checklist live in [`.atteler/README.md`](.atteler/README.md).
   `.atteler/events.jsonl`, adjacent `.atteler-state*` temp/state files,
   `.atteler-config-*.tmp` migration temp files, `.atteler/eval-report*.json`,
   `.atteler/codeintel-index.json`, `.atteler/*-vector-index*.json`,
-  `.atteler/agent-memory.json`, `.atteler/skill-learning/`, raw recorded
+  `.atteler/agent-memory.json`, nested `.atteler/` memory/vector temp files,
+  `.atteler/skill-learning/`, raw recorded
   responses such as `.atteler/fixtures/once.json`, local MCP manifests such as
   `.atteler/mcp.yaml`, plugin scaffolds such as `.atteler/plugins/`, watch
   baselines such as `.atteler/watch-baseline.json`, and incident drafts such as
