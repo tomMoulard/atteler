@@ -37,6 +37,7 @@
 
 # Nested/generated Atteler stores that can appear below package working dirs.
 **/.atteler/workspace-vector-index*.json
+**/.atteler/workspace-index*.json
 **/.atteler/codeintel-index*.json
 **/.atteler/agent-memory.json
 **/.atteler/session-vector-index*.json
