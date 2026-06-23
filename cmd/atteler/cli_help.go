@@ -343,7 +343,7 @@ func lookupFlagDomain(name string) (string, bool) {
 		return researchDomainName, true
 	case name == autoresearchDomainName:
 		return autoresearchDomainName, true
-	case name == "once" || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||
+	case name == onceCommandName || name == "stdin" || name == "output" || name == "autonomy" || name == "headless" ||
 		name == autoFlagName || name == "auto-max-depth" ||
 		name == "list-headless" || name == "stream-headless" ||
 		name == "status-headless" || name == "cancel-headless" || name == "recover-headless" ||

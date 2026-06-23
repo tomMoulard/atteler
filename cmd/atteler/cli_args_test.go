@@ -163,6 +163,56 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--issue-implement", "GH-218", "--issue-workflow", "custom/WORKFLOW.md", "--update-docs", "--update-changelog"},
 		},
 		{
+			name: "issue watch command maps grouped flags",
+			args: []string{"issue", "watch", "--github", "owner/repo", "--label", "atteler-agent", "--once"},
+			want: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "atteler-agent", "--issue-watch-once"},
+		},
+		{
+			name: "issue watch preserves known global flags",
+			args: []string{"issue", "watch", "--github", "owner/repo", "--label", "atteler-agent", "--deny-operation", "network", "--autonomy", "high"},
+			want: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "atteler-agent", "--deny-operation", "network", "--autonomy", "high"},
+		},
+		{
+			name: "issue watch dry-run supports inline values",
+			args: []string{"issue", "watch", "--github=owner/repo", "--label=ready-for-ai", "--dry-run"},
+			want: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "ready-for-ai", "--issue-watch-dry-run"},
+		},
+		{
+			name: "issue watch maps local workflow commands",
+			args: []string{"issue", "watch", "--github", "owner/repo", "--label", "atteler-agent", "--command", "printf ok", "--validation-command", "go test ./...", "--command-timeout-seconds", "120", "--once"},
+			want: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "atteler-agent", "--issue-watch-command", "printf ok", "--issue-watch-validation-command", "go test ./...", "--issue-watch-command-timeout-seconds", "120", "--issue-watch-once"},
+		},
+		{
+			name: "issue list-candidates maps to issue watch dry-run",
+			args: []string{"issue", "list-candidates", "--github", "owner/repo", "--label", "ready-for-ai"},
+			want: []string{"--issue-watch", "--issue-watch-github", "owner/repo", "--issue-watch-label", "ready-for-ai", "--issue-watch-dry-run", "--issue-watch-once"},
+		},
+		{
+			name: "issue run maps single issue to issue watch run",
+			args: []string{"issue", "run", "232", "--github", "owner/repo"},
+			want: []string{"--issue-watch", "--issue-watch-once", "--issue-watch-github", "owner/repo", "--issue-watch-run", "232"},
+		},
+		{
+			name: "issue run keeps flags before issue reference",
+			args: []string{"issue", "run", "--github=owner/repo", "--dry-run", "GH-232"},
+			want: []string{"--issue-watch", "--issue-watch-once", "--issue-watch-github", "owner/repo", "--issue-watch-dry-run", "--issue-watch-run", "GH-232"},
+		},
+		{
+			name: "issue run maps local workflow commands",
+			args: []string{"issue", "run", "232", "--github", "owner/repo", "--command", "printf ok", "--validation-command", "go test ./..."},
+			want: []string{"--issue-watch", "--issue-watch-once", "--issue-watch-github", "owner/repo", "--issue-watch-command", "printf ok", "--issue-watch-validation-command", "go test ./...", "--issue-watch-run", "232"},
+		},
+		{
+			name: "issue run accepts once without consuming issue reference",
+			args: []string{"issue", "run", "--once", "232", "--github", "owner/repo"},
+			want: []string{"--issue-watch", "--issue-watch-once", "--issue-watch-github", "owner/repo", "--issue-watch-run", "232"},
+		},
+		{
+			name: "issue run preserves known global flags",
+			args: []string{"issue", "run", "232", "--github", "owner/repo", "--deny-operation", "network"},
+			want: []string{"--issue-watch", "--issue-watch-once", "--issue-watch-github", "owner/repo", "--deny-operation", "network", "--issue-watch-run", "232"},
+		},
+		{
 			name: "autoresearch run helper",
 			args: []string{"autoresearch", "run", "improve", "agent", "flow"},
 			want: []string{"--autoresearch", "improve agent flow"},
@@ -1112,6 +1162,22 @@ func TestTranslateCLIArgs_DomainHelpAndUnknownCommand(t *testing.T) {
 	require.EqualError(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Err, "unknown code-intel flag \"--wat\"; run `atteler help code-intel`")
 	assert.False(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Help)
 	assert.Empty(t, unknownCodeIntelCommandTailFlagAfterScopedPrefix.Args)
+
+	issueWatchConflictingFlag := translateCLIArgsWithFlagSet(
+		[]string{"issue", "watch", "--github", "owner/repo", "--label", "atteler-agent", "--issue-implement", "GH-1"},
+		registeredFlags,
+	)
+	require.EqualError(t, issueWatchConflictingFlag.Err, "unknown issue watch flag \"--issue-implement\"; run `atteler help issue`")
+	assert.False(t, issueWatchConflictingFlag.Help)
+	assert.Empty(t, issueWatchConflictingFlag.Args)
+
+	issueRunConflictingFlag := translateCLIArgsWithFlagSet(
+		[]string{"issue", "run", "232", "--github", "owner/repo", "--open-pr"},
+		registeredFlags,
+	)
+	require.EqualError(t, issueRunConflictingFlag.Err, "unknown issue run flag \"--open-pr\"; run `atteler help issue`")
+	assert.False(t, issueRunConflictingFlag.Help)
+	assert.Empty(t, issueRunConflictingFlag.Args)
 
 	delimitedCodeIntelDashValue := translateCLIArgsWithFlagSet([]string{"code-intel", "symbol", "--", "--generated-name"}, registeredFlags)
 	require.NoError(t, delimitedCodeIntelDashValue.Err)

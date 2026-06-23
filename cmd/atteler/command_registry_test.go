@@ -85,7 +85,7 @@ func TestCommandRegistry_TopLevelRegistryStaysSmall(t *testing.T) {
 	t.Parallel()
 
 	registry := buildCommandRegistry()
-	assert.LessOrEqual(t, len(registry), 53, "top-level command registry should stay grouped by domain instead of one entry per flag")
+	assert.LessOrEqual(t, len(registry), 54, "top-level command registry should stay grouped by domain instead of one entry per flag")
 }
 
 func TestCommandRegistry_ContractsAreWellFormed(t *testing.T) {
@@ -438,6 +438,20 @@ func TestCommandSurface_RepresentativeSideEffectsAndOutputsAreStable(t *testing.
 			name: "issue-implement",
 			sideEffects: []string{
 				commandEffectConfigRead,
+				commandEffectFilesystemRead,
+				commandEffectFilesystemWrite,
+				commandEffectGitRead,
+				commandEffectGitWrite,
+				commandEffectNetwork,
+				commandEffectProcessExecute,
+				commandEffectWorktreeWrite,
+				commandEffectUserOutput,
+			},
+			outputModes: []string{commandOutputText},
+		},
+		{
+			name: "issue-watch",
+			sideEffects: []string{
 				commandEffectFilesystemRead,
 				commandEffectFilesystemWrite,
 				commandEffectGitRead,
@@ -1963,6 +1977,24 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			name:     "issue implement routes providerless with publication flags",
 			args:     []string{"issue", "implement", "GH-218", "--open-pr", "--run-tests", "--run-lint"},
 			wantName: "issue-implement",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "issue watch routes providerless with local-only flags",
+			args:     []string{"issue", "watch", "--github", "owner/repo", "--label", "atteler-agent", "--once"},
+			wantName: "issue-watch",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "issue list-candidates routes to issue watch dry-run",
+			args:     []string{"issue", "list-candidates", "--github", "owner/repo", "--label", "atteler-agent"},
+			wantName: "issue-watch",
+			wantTier: tierProviderless,
+		},
+		{
+			name:     "issue run routes to issue watch single issue",
+			args:     []string{"issue", "run", "232", "--github", "owner/repo"},
+			wantName: "issue-watch",
 			wantTier: tierProviderless,
 		},
 	}

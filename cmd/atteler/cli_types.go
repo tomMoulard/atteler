@@ -251,6 +251,11 @@ type cliOptions struct {
 	issueImplementRef                  string
 	issueWorkflowPath                  string
 	issueBaseBranch                    string
+	issueWatchGitHub                   string
+	issueWatchGitHubEndpoint           string
+	issueWatchGitHubToken              string
+	issueWatchRunRef                   string
+	issueWatchCommand                  string
 	issueImplementRequested            bool
 	contextPackPath                    string
 	model                              string
@@ -460,6 +465,8 @@ type cliOptions struct {
 	watchGitHubEndpoint                string
 	watchGitHubToken                   string
 	sessionTags                        stringListFlag
+	issueWatchLabels                   stringListFlag
+	issueWatchValidationCommands       rawStringListFlag
 	watchIssueLabels                   stringListFlag
 	agentMemoryIndexFiles              stringListFlag
 	memoryRedactRules                  rawStringListFlag
@@ -517,6 +524,8 @@ type cliOptions struct {
 	promptCompleteLimit                positiveIntFlag
 	watchLargeFileBytes                positiveIntFlag
 	watchIntervalSeconds               positiveIntFlag
+	issueWatchIntervalSeconds          positiveIntFlag
+	issueWatchCommandTimeout           positiveIntFlag
 	watchMaxIterations                 positiveIntFlag
 	skillMaxSteps                      positiveIntFlag
 	skillMinOccurrences                positiveIntFlag
@@ -624,6 +633,9 @@ type cliOptions struct {
 	issueRunLint                       bool
 	issueUpdateDocs                    bool
 	issueUpdateChangelog               bool
+	issueWatch                         bool
+	issueWatchOnce                     bool
+	issueWatchDryRun                   bool
 	explainConfig                      bool
 	memoryCompact                      bool
 	memoryIncludeSessionMessages       bool

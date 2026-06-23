@@ -7,15 +7,18 @@ import (
 )
 
 const (
-	bashCommandName        = "bash"
-	autoresearchDomainName = "autoresearch"
-	helpCommandName        = "help"
-	issueCommandName       = "issue"
-	researchDomainName     = "research"
-	sessionCommandName     = "session"
-	helpLongFlag           = "--help"
-	helpGoFlag             = "-help"
-	helpShortFlag          = "-h"
+	bashCommandName          = "bash"
+	autoresearchDomainName   = "autoresearch"
+	helpCommandName          = "help"
+	issueCommandName         = "issue"
+	researchDomainName       = "research"
+	sessionCommandName       = "session"
+	helpLongFlag             = "--help"
+	helpGoFlag               = "-help"
+	helpShortFlag            = "-h"
+	runCommandName           = "run"
+	onceCommandName          = "once"
+	issueWatchDryRunModeName = "dry-run"
 
 	agentMemoryIndexFlag   = "--agent-memory-index"
 	agentMemoryDeleteFlag  = "--agent-memory-delete"
@@ -68,8 +71,8 @@ var cliHelpDomains = []cliHelpDomain{
 		Summary: "Run the TUI or one-shot prompts, manage saved sessions, transcripts, headless runs, artifacts, and multi-agent run records.",
 		Aliases: []string{"chat", helpSelectorSession, "sessions"},
 		Commands: []cliCommandAlias{
-			{Name: "run", Args: "[prompt]", Summary: "start chat or run positional one-shot prompt text", JoinArgs: true},
-			{Name: "once", Args: "<prompt|--stdin>", Summary: "send one prompt and exit", Legacy: []string{"--once"}, JoinArgs: true, PromptFromStdin: true},
+			{Name: runCommandName, Args: "[prompt]", Summary: "start chat or run positional one-shot prompt text", JoinArgs: true},
+			{Name: onceCommandName, Args: "<prompt|--stdin>", Summary: "send one prompt and exit", Legacy: []string{"--once"}, JoinArgs: true, PromptFromStdin: true},
 			{Name: "list", Summary: "list saved sessions", Legacy: []string{"--list-sessions"}},
 			{Name: "tags", Summary: "list saved session tags", Legacy: []string{"--list-session-tags"}},
 			{Name: "search", Args: "<query>", Summary: "search saved session metadata and transcripts", Legacy: []string{"--search-sessions"}, JoinArgs: true},
@@ -210,7 +213,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Summary: "Create local-first cited research run artifacts for technical decisions, architecture exploration, dependency evaluation, and planning.",
 		Commands: []cliCommandAlias{
 			{
-				Name:     "run",
+				Name:     runCommandName,
 				Args:     "<question>",
 				Summary:  "gather project guidance and supplied sources into a cited research report",
 				Legacy:   []string{"--research-run"},
@@ -229,7 +232,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Summary: "Run a headless worktree loop that proposes code experiments, validates them, and keeps only improvements.",
 		Commands: []cliCommandAlias{
 			{
-				Name:     "run",
+				Name:     runCommandName,
 				Args:     "<mission>",
 				Summary:  "start an autonomous code experiment loop for a hard or long task",
 				Legacy:   []string{"--autoresearch"},
@@ -245,7 +248,7 @@ var cliHelpDomains = []cliHelpDomain{
 	{
 		Name:    issueCommandName,
 		Title:   "Issue implementation",
-		Summary: "Run the autonomous Symphony issue-to-PR agent with explicit verification gates.",
+		Summary: "Implement individual issues or prepare local-first issue-watch runs without publishing.",
 		Aliases: []string{"issues"},
 		Commands: []cliCommandAlias{
 			{
@@ -254,11 +257,32 @@ var cliHelpDomains = []cliHelpDomain{
 				Summary: "implement one tracker issue and optionally open a verified pull request",
 				Legacy:  []string{"--issue-implement"},
 			},
+			{
+				Name:    "watch",
+				Summary: "watch labeled GitHub issues and prepare local-only worktree run artifacts",
+				Legacy:  []string{"--issue-watch"},
+			},
+			{
+				Name:    runCommandName,
+				Args:    "<issue-ref>",
+				Summary: "prepare one GitHub issue as a local-only issue-watch run",
+				Legacy:  []string{"--issue-watch", "--issue-watch-once", "--issue-watch-run"},
+			},
+			{
+				Name:    "list-candidates",
+				Summary: "list issue-watch candidates without creating local worktrees or artifacts",
+				Legacy:  []string{"--issue-watch", "--issue-watch-dry-run", "--issue-watch-once"},
+			},
 		},
 		Examples: []string{
 			`atteler issue implement GH-218 --open-pr`,
 			`atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`,
 			`atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint`,
+			`atteler issue watch --github owner/repo --label atteler-agent --once`,
+			`atteler issue watch --github owner/repo --label ready-for-ai --dry-run`,
+			`atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`,
+			`atteler issue list-candidates --github owner/repo --label ready-for-ai`,
+			`atteler issue run 232 --github owner/repo`,
 		},
 	},
 	{
@@ -333,7 +357,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Commands: []cliCommandAlias{
 			{Name: "scan", Summary: "scan the current repository and print a structured review report", Legacy: []string{"--review-scan"}},
 			{Name: "plan", Summary: "print speculative review-agent plan", Legacy: []string{"--review-plan"}},
-			{Name: "run", Summary: "execute the review-agent three-round pipeline", Legacy: []string{"--review-run"}},
+			{Name: runCommandName, Summary: "execute the review-agent three-round pipeline", Legacy: []string{"--review-run"}},
 		},
 		Examples: []string{
 			`atteler review scan`,
@@ -365,7 +389,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Commands: []cliCommandAlias{
 			{Name: "list", Summary: "list configured local plugin manifests", Legacy: []string{"--list-plugins"}},
 			{Name: "describe", Args: "<name>", Summary: "print one configured plugin manifest", Legacy: []string{"--describe-plugin"}},
-			{Name: "run", Args: "<plugin[/entrypoint]>", Summary: "execute a configured plugin entrypoint", Legacy: []string{"--run-plugin"}},
+			{Name: runCommandName, Args: "<plugin[/entrypoint]>", Summary: "execute a configured plugin entrypoint", Legacy: []string{"--run-plugin"}},
 			{Name: "init-rtk", Args: "<dir>", Summary: "write an RTK plugin scaffold", Legacy: []string{"--init-rtk-plugin"}},
 			{Name: "mcp-manifest", Args: "<path>", Summary: "validate/list an MCP manifest", Legacy: []string{"--mcp-manifest"}, Aliases: []string{"manifest"}},
 			{Name: "mcp-tool", Args: "<tool>", Summary: "invoke an MCP tool through tools/call", Legacy: []string{"--mcp-tool"}, Aliases: []string{"tool"}},
@@ -383,7 +407,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Summary: "Run sessions in isolated git worktrees; worktrees are preserved by default and merge-back is review-gated.",
 		Aliases: []string{"worktree", "wt"},
 		Commands: []cliCommandAlias{
-			{Name: "run", Args: "[prompt]", Summary: "enable worktree isolation for this session; add --worktree-auto-merge plus --worktree-verify-command to merge on exit", Legacy: []string{"--worktree"}, JoinArgs: true},
+			{Name: runCommandName, Args: "[prompt]", Summary: "enable worktree isolation for this session; add --worktree-auto-merge plus --worktree-verify-command to merge on exit", Legacy: []string{"--worktree"}, JoinArgs: true},
 			{Name: "list", Summary: "list active atteler worktrees", Legacy: []string{"--list-worktrees"}},
 			{Name: "merge", Args: "<session-id>", Summary: "manually merge a session worktree back into its base branch; add --worktree-verify-command to run checks first or --merge-worktree-allow-base-mismatch to override the recorded-base preflight", Legacy: []string{"--merge-worktree"}},
 		},
@@ -400,7 +424,7 @@ var cliHelpDomains = []cliHelpDomain{
 		Aliases: []string{"evaluation", "evaluations"},
 		Commands: []cliCommandAlias{
 			{Name: "output", Args: "<path>", Summary: "compare actual output against expected text/file", Legacy: []string{"--eval-output"}},
-			{Name: "run", Args: "<path>", Summary: "run a structured YAML/JSON assertion file", Legacy: []string{"--eval-assertions"}},
+			{Name: runCommandName, Args: "<path>", Summary: "run a structured YAML/JSON assertion file", Legacy: []string{"--eval-assertions"}},
 			{Name: "fixtures", Args: "<dir>", Summary: "discover and run structured eval fixtures in a directory", Legacy: []string{"--eval-fixture-dir"}},
 			{Name: "list", Summary: "list agent evaluations on --session", Legacy: []string{"--list-evaluations"}},
 			{Name: "record", Args: "<agent>", Summary: "append an evaluation to --session", Legacy: []string{"--record-evaluation"}},
@@ -418,44 +442,46 @@ var cliHelpDomains = []cliHelpDomain{
 }
 
 var implicitFlagDefaults = map[string]string{
-	"agent-memory-limit":          "5",
-	"agent-memory-ttl-seconds":    "none",
-	"bash-timeout-seconds":        "120",
-	"context-pack-tokens":         "unlimited; capped by --model window when known",
-	"git-history-limit":           "5",
-	"mcp-timeout-seconds":         "none",
-	"memory-limit":                "5",
-	"memory-retention-days":       "disabled",
-	"memory-ttl-seconds":          "none",
-	"merge-artifact-max-bytes":    strconv.FormatInt(watch.DefaultLargeFileBytes, 10),
-	"plan-max-agents":             "unlimited",
-	"plugin-timeout-seconds":      "30",
-	"prompt-complete-limit":       "5",
-	"retrieval-limit":             "5",
-	"skill-max-steps":             "6",
-	"skill-min-occurrences":       "2",
-	"spawn-cost-budget-micros":    "none",
-	"spawn-ledger":                ".atteler/runs/.../ledger.json",
-	"spawn-max-concurrency":       "4",
-	"spawn-output-budget-bytes":   "none",
-	"spawn-retries":               "0",
-	"spawn-retry-backoff-seconds": "none",
-	"spawn-task-timeout-seconds":  "none",
-	"spawn-timeout-seconds":       "none",
-	"spawn-token-budget":          "none",
-	"vector-base-url":             vectorDefaultBaseURL,
-	"vector-chunk-max-runes":      "1200",
-	"vector-chunk-overlap-runes":  "120",
-	"vector-fallback":             "fail",
-	"vector-limit":                "5",
-	"vector-model":                vectorDefaultModel,
-	"vector-provider":             vectorDefaultProvider,
-	"vector-store":                ".atteler/vector-index.json",
-	"vector-timeout-seconds":      vectorDefaultTimeoutSeconds,
-	"vectorizer":                  "lexical",
-	"watch-interval-seconds":      "60",
-	"watch-gate-min-severity":     "high",
-	"watch-issue-min-severity":    "high",
-	"watch-large-file-bytes":      strconv.FormatInt(watch.DefaultLargeFileBytes, 10),
-	"watch-max-iterations":        "unlimited",
+	"agent-memory-limit":                  "5",
+	"agent-memory-ttl-seconds":            "none",
+	"bash-timeout-seconds":                "120",
+	"context-pack-tokens":                 "unlimited; capped by --model window when known",
+	"git-history-limit":                   "5",
+	"mcp-timeout-seconds":                 "none",
+	"memory-limit":                        "5",
+	"memory-retention-days":               "disabled",
+	"memory-ttl-seconds":                  "none",
+	"merge-artifact-max-bytes":            strconv.FormatInt(watch.DefaultLargeFileBytes, 10),
+	"plan-max-agents":                     "unlimited",
+	"plugin-timeout-seconds":              "30",
+	"prompt-complete-limit":               "5",
+	"retrieval-limit":                     "5",
+	"skill-max-steps":                     "6",
+	"skill-min-occurrences":               "2",
+	"spawn-cost-budget-micros":            "none",
+	"spawn-ledger":                        ".atteler/runs/.../ledger.json",
+	"spawn-max-concurrency":               "4",
+	"spawn-output-budget-bytes":           "none",
+	"spawn-retries":                       "0",
+	"spawn-retry-backoff-seconds":         "none",
+	"spawn-task-timeout-seconds":          "none",
+	"spawn-timeout-seconds":               "none",
+	"spawn-token-budget":                  "none",
+	"vector-base-url":                     vectorDefaultBaseURL,
+	"vector-chunk-max-runes":              "1200",
+	"vector-chunk-overlap-runes":          "120",
+	"vector-fallback":                     "fail",
+	"vector-limit":                        "5",
+	"vector-model":                        vectorDefaultModel,
+	"vector-provider":                     vectorDefaultProvider,
+	"vector-store":                        ".atteler/vector-index.json",
+	"vector-timeout-seconds":              vectorDefaultTimeoutSeconds,
+	"vectorizer":                          "lexical",
+	"watch-interval-seconds":              "60",
+	"watch-gate-min-severity":             "high",
+	"watch-issue-min-severity":            "high",
+	"watch-large-file-bytes":              strconv.FormatInt(watch.DefaultLargeFileBytes, 10),
+	"watch-max-iterations":                "unlimited",
+	"issue-watch-interval-seconds":        "60",
+	"issue-watch-command-timeout-seconds": "600",
 }

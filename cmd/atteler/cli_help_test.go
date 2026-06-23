@@ -1011,12 +1011,15 @@ func splitCommandLineForTest(t *testing.T, command string) []string {
 	)
 
 	inDoubleQuote := false
+	inSingleQuote := false
 
 	for _, r := range command {
 		switch {
-		case r == '"':
+		case r == '"' && !inSingleQuote:
 			inDoubleQuote = !inDoubleQuote
-		case r == ' ' && !inDoubleQuote:
+		case r == '\'' && !inDoubleQuote:
+			inSingleQuote = !inSingleQuote
+		case r == ' ' && !inDoubleQuote && !inSingleQuote:
 			if current.Len() > 0 {
 				args = append(args, current.String())
 				current.Reset()
@@ -1027,6 +1030,7 @@ func splitCommandLineForTest(t *testing.T, command string) []string {
 	}
 
 	require.False(t, inDoubleQuote, "unclosed double quote in command example %q", command)
+	require.False(t, inSingleQuote, "unclosed single quote in command example %q", command)
 
 	if current.Len() > 0 {
 		args = append(args, current.String())
