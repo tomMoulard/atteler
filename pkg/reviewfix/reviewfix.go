@@ -277,6 +277,10 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 	source := firstString(stringField(object, "source", "Source", "reviewer", "Reviewer", "tool", "Tool"), parentSource)
 
 	if findingsValue, ok := fieldValue(object, "findings", "Findings", "results", "Results", "comments", "Comments"); ok {
+		if findingsValue == nil {
+			return nil, true, nil
+		}
+
 		findings, err := collectFindings(findingsValue, source)
 		if err != nil {
 			return nil, true, err
@@ -286,8 +290,14 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 	}
 
 	var all []Finding
+	sawNested := false
 	for _, key := range []string{"verdict", "Verdict", "report", "Report"} {
 		if nested, ok := object[key]; ok {
+			sawNested = true
+			if nested == nil {
+				continue
+			}
+
 			findings, err := collectFindings(nested, source)
 			if err != nil {
 				return nil, true, err
@@ -299,6 +309,27 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 
 	for _, key := range []string{"reports", "Reports"} {
 		if nested, ok := object[key]; ok {
+			sawNested = true
+			if nested == nil {
+				continue
+			}
+
+			findings, err := collectFindings(nested, source)
+			if err != nil {
+				return nil, true, err
+			}
+
+			all = append(all, findings...)
+		}
+	}
+
+	for _, key := range []string{"session", "Session"} {
+		if nested, ok := object[key]; ok {
+			sawNested = true
+			if nested == nil {
+				continue
+			}
+
 			findings, err := collectFindings(nested, source)
 			if err != nil {
 				return nil, true, err
@@ -310,6 +341,9 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 
 	if len(all) > 0 {
 		return all, true, nil
+	}
+	if sawNested {
+		return nil, true, nil
 	}
 
 	return nil, false, nil
@@ -875,6 +909,9 @@ func RenderPlanMarkdown(plan Plan) string {
 			if finding.SuggestedFix != "" {
 				fmt.Fprintf(&b, "    - Suggested fix: %s\n", firstLine(finding.SuggestedFix))
 			}
+			if finding.SuggestedVerification != "" {
+				fmt.Fprintf(&b, "    - Suggested verification: `%s`\n", finding.SuggestedVerification)
+			}
 		}
 	}
 
@@ -1091,6 +1128,18 @@ func RenderChangesMarkdown(record RunRecord) string {
 		for i := range record.Findings {
 			finding := record.Findings[i]
 			fmt.Fprintf(&b, "- `%s` %s%s: %s\n", finding.ID, severityLabel(finding.Severity), locationSuffix(finding), finding.Message)
+			if finding.Source != "" {
+				fmt.Fprintf(&b, "  - Source: %s\n", finding.Source)
+			}
+			if finding.Evidence != "" {
+				fmt.Fprintf(&b, "  - Evidence: %s\n", firstLine(finding.Evidence))
+			}
+			if finding.SuggestedFix != "" {
+				fmt.Fprintf(&b, "  - Suggested fix: %s\n", firstLine(finding.SuggestedFix))
+			}
+			if finding.SuggestedVerification != "" {
+				fmt.Fprintf(&b, "  - Suggested verification: `%s`\n", finding.SuggestedVerification)
+			}
 		}
 	}
 

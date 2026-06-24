@@ -2238,6 +2238,7 @@ Examples:
 - `atteler review plan`
 - `atteler review run`
 - `atteler review fix --from review.json --validate "go test ./..."`
+- `atteler review fix --from review.json --worktree --validate "go test ./..."`
 
 ## Watch
 
@@ -3294,7 +3295,7 @@ Commands:
   - Input: `reviewFixCommandInput`
   - Input fields: `From`, `PR`, `ValidationCommands`, `Worktree`
   - Flags: `--review-fix`, `--from`, `--review-fix-from`, `--pr`, `--review-fix-pr`, `--validate`, `--review-fix-validate`
-  - Examples: `atteler review fix --from review.json`, `atteler review fix --from .atteler/reviews/latest/findings.json --validate "go test ./..."`
+  - Examples: `atteler review fix --from review.json`, `atteler review fix --from .atteler/reviews/latest/findings.json --validate "go test ./..."`, `atteler review fix --from review.json --worktree --validate "go test ./..."`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
   - Side effects: `filesystem-read`, `filesystem-write`, `git-read`, `llm-provider-read`, `process-execute`, `session-store-write`, `stdout`, `worktree-write`

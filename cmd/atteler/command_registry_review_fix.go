@@ -16,7 +16,7 @@ func validateReviewFixCommandSelection(opts cliOptions) error {
 	}
 
 	if opts.reviewFix && opts.reviewFixFrom == "" && opts.reviewFixPR == "" {
-		return errors.New("review fix requires --from for Atteler-native review findings")
+		return errors.New("review fix requires --from for Atteler-native review findings or --pr for a future GitHub source")
 	}
 
 	if opts.reviewFix && opts.reviewFixFrom != "" && opts.reviewFixPR != "" {

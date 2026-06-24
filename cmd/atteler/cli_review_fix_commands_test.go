@@ -99,6 +99,52 @@ func TestRunReviewFix_WritesValidationFailureArtifacts(t *testing.T) { //nolint:
 	assert.False(t, record.RemotePublishing)
 }
 
+func TestRunReviewFix_PatchArtifactSkipsPreexistingUnrelatedChanges(t *testing.T) { //nolint:paralleltest // captures process-wide stdout/stderr from command helpers.
+	root := t.TempDir()
+	runGitForReviewFixTest(t, root, "init")
+	runGitForReviewFixTest(t, root, "config", "user.email", "atteler@example.test")
+	runGitForReviewFixTest(t, root, "config", "user.name", "Atteler Test")
+	runGitForReviewFixTest(t, root, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "example.txt"), []byte("old\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("before\n"), 0o600))
+	runGitForReviewFixTest(t, root, "add", "example.txt", "unrelated.txt")
+	runGitForReviewFixTest(t, root, "commit", "-m", "seed")
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("preexisting user change\n"), 0o600))
+	writeReviewFixFindingInput(t, root, reviewFixExamplePatch)
+
+	store := session.NewStore(filepath.Join(root, "sessions"))
+	state := appState{
+		cwd:          root,
+		sessionStore: store,
+		sessionState: session.New("gpt-test", nil),
+		autonomy:     autonomy.Medium,
+	}
+
+	err := runReviewFix(t.Context(), state, reviewFixCommandInput{From: "review.json"})
+	require.NoError(t, err)
+
+	runs, err := filepath.Glob(filepath.Join(root, ".atteler", "runs", "review-fix", "*"))
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+
+	patch, err := os.ReadFile(filepath.Join(runs[0], "patch.diff"))
+	require.NoError(t, err)
+	assert.Contains(t, string(patch), "example.txt")
+	assert.NotContains(t, string(patch), "unrelated.txt")
+	assert.NotContains(t, string(patch), "preexisting user change")
+
+	runData, err := os.ReadFile(filepath.Join(runs[0], "run.json"))
+	require.NoError(t, err)
+	var record reviewfix.RunRecord
+	require.NoError(t, json.Unmarshal(runData, &record))
+	assert.NotContains(t, record.ChangedFiles, reviewfix.ChangedFile{Status: "M", Path: "unrelated.txt"})
+
+	unrelated, err := os.ReadFile(filepath.Join(root, "unrelated.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "preexisting user change\n", string(unrelated))
+}
+
 func TestRunReviewFixStateful_FinalizesPreservedWorktree(t *testing.T) { //nolint:paralleltest // captures process-wide stdout/stderr.
 	cwd := t.TempDir()
 	worktreeRoot := t.TempDir()
@@ -163,6 +209,13 @@ func TestReviewFixSuggestedDiffForPlan_RequiresEveryFindingToBePatchable(t *test
 	assert.Contains(t, combined, "+new")
 }
 
+func TestValidateReviewFixRunInput_RejectsReservedPRSource(t *testing.T) {
+	t.Parallel()
+
+	err := validateReviewFixRunInput(reviewFixCommandInput{PR: "123"})
+	require.ErrorContains(t, err, "--pr input is not supported in the MVP")
+}
+
 func TestReviewFixLocalAutonomy_ClampsPublishingLevels(t *testing.T) {
 	t.Parallel()
 
@@ -170,6 +223,27 @@ func TestReviewFixLocalAutonomy_ClampsPublishingLevels(t *testing.T) {
 	assert.Equal(t, autonomy.Medium, reviewFixLocalAutonomy(autonomy.Medium))
 	assert.Equal(t, autonomy.Medium, reviewFixLocalAutonomy(autonomy.High))
 	assert.Equal(t, autonomy.Medium, reviewFixLocalAutonomy(autonomy.Full))
+}
+
+func TestReviewFixPreexistingUnrelatedPaths_KeepsAbsoluteFindingPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	runGitForReviewFixTest(t, root, "init")
+	runGitForReviewFixTest(t, root, "config", "user.email", "atteler@example.test")
+	runGitForReviewFixTest(t, root, "config", "user.name", "Atteler Test")
+	runGitForReviewFixTest(t, root, "config", "commit.gpgsign", "false")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "target.txt"), []byte("before\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("before\n"), 0o600))
+	runGitForReviewFixTest(t, root, "add", "target.txt", "unrelated.txt")
+	runGitForReviewFixTest(t, root, "commit", "-m", "seed")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "target.txt"), []byte("dirty target\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("dirty unrelated\n"), 0o600))
+
+	paths, err := reviewFixPreexistingUnrelatedPaths(t.Context(), root, []reviewfix.Finding{{File: filepath.Join(root, "target.txt")}})
+	require.NoError(t, err)
+
+	assert.ElementsMatch(t, []string{filepath.Join(root, "unrelated.txt")}, paths)
 }
 
 func TestReviewFixPatchDiff_IncludesUntrackedFilesButSkipsArtifacts(t *testing.T) {

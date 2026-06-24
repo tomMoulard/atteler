@@ -57,6 +57,7 @@ func runReviewFix(ctx context.Context, state appState, input reviewFixCommandInp
 	if err != nil {
 		return fmt.Errorf("review fix: discover guidance: %w", err)
 	}
+	preexistingExcludePaths, preexistingErr := reviewFixPreexistingUnrelatedPaths(ctx, root, findings)
 
 	startedAt := time.Now().UTC()
 	worktreeRequested := input.Worktree || state.worktreeInfo != nil
@@ -75,9 +76,10 @@ func runReviewFix(ctx context.Context, state appState, input reviewFixCommandInp
 	applyMode, applyErr := applyReviewFixPlan(ctx, state, root, plan)
 	validation := runReviewFixValidation(ctx, state, root, input.ValidationCommands)
 
-	patch, patchErr := reviewFixPatchDiff(ctx, root, paths.RunDir, inputPath)
-	changedFiles, changesErr := reviewFixChangedFiles(ctx, root, paths.RunDir, inputPath)
-	artifactApplyError := reviewFixArtifactError(applyErr, patchErr, changesErr)
+	diffExcludePaths := append([]string{paths.RunDir, inputPath}, preexistingExcludePaths...)
+	patch, patchErr := reviewFixPatchDiff(ctx, root, diffExcludePaths...)
+	changedFiles, changesErr := reviewFixChangedFiles(ctx, root, diffExcludePaths...)
+	artifactApplyError := reviewFixArtifactError(applyErr, preexistingErr, patchErr, changesErr)
 
 	record := reviewfix.NewRunRecord(
 		startedAt,
@@ -374,6 +376,37 @@ func runReviewFixValidation(ctx context.Context, state appState, root string, co
 	}
 
 	return results
+}
+
+func reviewFixPreexistingUnrelatedPaths(ctx context.Context, root string, findings []reviewfix.Finding) ([]string, error) {
+	changedFiles, err := reviewFixChangedFiles(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+
+	findingPaths := reviewFixFindingPathSet(root, findings)
+	paths := make([]string, 0, len(changedFiles))
+	for _, changed := range changedFiles {
+		if changed.Path == "" || findingPaths[reviewFixRelativePath(root, changed.Path)] {
+			continue
+		}
+
+		paths = append(paths, filepath.Join(root, changed.Path))
+	}
+
+	return paths, nil
+}
+
+func reviewFixFindingPathSet(root string, findings []reviewfix.Finding) map[string]bool {
+	paths := make(map[string]bool, len(findings))
+	for i := range findings {
+		rel := reviewFixRelativePath(root, findings[i].File)
+		if rel != "" {
+			paths[rel] = true
+		}
+	}
+
+	return paths
 }
 
 func reviewFixPatchDiff(ctx context.Context, root string, excludePaths ...string) (string, error) {

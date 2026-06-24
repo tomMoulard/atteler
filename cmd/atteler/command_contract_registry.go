@@ -540,6 +540,7 @@ func commandContractsByName() map[string]commandContract {
 			withExamples(
 				"atteler review fix --from review.json",
 				"atteler review fix --from .atteler/reviews/latest/findings.json --validate \"go test ./...\"",
+				"atteler review fix --from review.json --worktree --validate \"go test ./...\"",
 			),
 		),
 		"review-scan-providerless": commandContractFor(

@@ -365,6 +365,7 @@ var cliHelpDomains = []cliHelpDomain{
 			`atteler review plan`,
 			`atteler review run`,
 			`atteler review fix --from review.json --validate "go test ./..."`,
+			`atteler review fix --from review.json --worktree --validate "go test ./..."`,
 		},
 	},
 	{

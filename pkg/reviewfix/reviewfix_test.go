@@ -74,6 +74,39 @@ func TestNormalizeFindings_AcceptsMarshaledAttelerReviewReport(t *testing.T) {
 	assert.Equal(t, "go test ./pkg/auth", findings[0].SuggestedVerification)
 }
 
+func TestNormalizeFindings_AcceptsMarshaledAttelerReviewResultSessionReports(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(review.Result{ //nolint:musttag // Exercises the current Atteler-native review.Result JSON shape.
+		Session: review.Session{
+			Reports: []review.Report{{
+				Reviewer: "quality",
+				Findings: []review.Finding{{
+					Severity:              review.SeverityMedium,
+					Category:              review.CategoryTests,
+					Path:                  "pkg/session.go",
+					Line:                  7,
+					Message:               "missing regression test",
+					Suggestion:            "add coverage for session report findings",
+					SuggestedVerification: "go test ./pkg/session",
+				}},
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	findings, err := NormalizeFindings(raw)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+
+	assert.Equal(t, "quality", findings[0].Source)
+	assert.Equal(t, "medium", findings[0].Severity)
+	assert.Equal(t, "tests", findings[0].Category)
+	assert.Equal(t, "pkg/session.go", findings[0].File)
+	assert.Equal(t, "add coverage for session report findings", findings[0].SuggestedFix)
+	assert.Equal(t, "go test ./pkg/session", findings[0].SuggestedVerification)
+}
+
 func TestNormalizeFindings_AcceptsAttelerLLMJSONShape(t *testing.T) {
 	t.Parallel()
 
@@ -151,17 +184,24 @@ func TestDiscoverGuidance_ReadsHarnessFiles(t *testing.T) {
 
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("follow repo rules"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("follow claude rules"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".cursorrules"), []byte("legacy cursor rules"), 0o600))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".cursor", "rules"), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".cursor", "rules", "go.md"), []byte("prefer gofmt"), 0o600))
 
 	guidance, err := DiscoverGuidance(t.Context(), root)
 	require.NoError(t, err)
-	require.Len(t, guidance, 2)
+	require.Len(t, guidance, 4)
 
-	assert.Equal(t, ".cursor/rules/go.md", guidance[0].Path)
-	assert.Equal(t, "prefer gofmt", guidance[0].Content)
-	assert.Equal(t, "AGENTS.md", guidance[1].Path)
-	assert.Equal(t, "follow repo rules", guidance[1].Content)
+	byPath := map[string]string{}
+	for i := range guidance {
+		byPath[guidance[i].Path] = guidance[i].Content
+	}
+
+	assert.Equal(t, "prefer gofmt", byPath[".cursor/rules/go.md"])
+	assert.Equal(t, "legacy cursor rules", byPath[".cursorrules"])
+	assert.Equal(t, "follow repo rules", byPath["AGENTS.md"])
+	assert.Equal(t, "follow claude rules", byPath["CLAUDE.md"])
 }
 
 func TestDiscoverGuidanceForFindings_ReadsNestedHarnessFiles(t *testing.T) {
@@ -191,7 +231,7 @@ func TestBuildPlan_GroupsByFileAndRootCause(t *testing.T) {
 	t.Parallel()
 
 	findings := []Finding{
-		{ID: "f1", Severity: "medium", File: "pkg/a.go", Line: 10, Message: "missing test for retry"},
+		{ID: "f1", Severity: "medium", File: "pkg/a.go", Line: 10, Message: "missing test for retry", SuggestedVerification: "go test ./pkg/a"},
 		{ID: "f2", Severity: "high", File: "pkg/a.go", Line: 20, Message: "nil pointer can panic"},
 		{ID: "f3", Severity: "low", File: "pkg/b.go", Category: "style", Message: "format drift"},
 	}
@@ -203,6 +243,7 @@ func TestBuildPlan_GroupsByFileAndRootCause(t *testing.T) {
 	assert.Equal(t, "pkg/a.go:tests", plan.Groups[1].Key)
 	assert.Equal(t, "pkg/b.go:style", plan.Groups[2].Key)
 	assert.Contains(t, RenderPlanMarkdown(plan), "AGENTS.md")
+	assert.Contains(t, RenderPlanMarkdown(plan), "Suggested verification: `go test ./pkg/a`")
 	assert.Contains(t, BuildAgentPrompt(plan), "Do not push branches")
 	assert.Contains(t, BuildAgentPrompt(plan), "rules")
 }
@@ -212,7 +253,16 @@ func TestWriteArtifacts_WritesExpectedRunFiles(t *testing.T) {
 
 	root := t.TempDir()
 	paths := ArtifactPathsFor(root, "20260619-120000-test")
-	plan := BuildPlan("review.json", []Finding{{ID: "f1", Severity: "high", File: "pkg/a.go", Message: "nil panic"}}, nil, []string{"go test ./..."}, false, time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC))
+	plan := BuildPlan("review.json", []Finding{{
+		ID:                    "f1",
+		Severity:              "high",
+		File:                  "pkg/a.go",
+		Message:               "nil panic",
+		Source:                "quality",
+		Evidence:              "user may be nil before dereference",
+		SuggestedFix:          "guard nil user",
+		SuggestedVerification: "go test ./pkg/a",
+	}}, nil, []string{"go test ./..."}, false, time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC))
 
 	require.NoError(t, WriteInitialArtifacts(t.Context(), paths, []byte(`{"findings":[]}`), plan))
 
@@ -250,6 +300,10 @@ func TestWriteArtifacts_WritesExpectedRunFiles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(changes), "## Original findings")
 	assert.Contains(t, string(changes), "nil panic")
+	assert.Contains(t, string(changes), "Source: quality")
+	assert.Contains(t, string(changes), "Evidence: user may be nil before dereference")
+	assert.Contains(t, string(changes), "Suggested fix: guard nil user")
+	assert.Contains(t, string(changes), "Suggested verification: `go test ./pkg/a`")
 	assert.Contains(t, string(changes), "## Remaining known issues")
 }
 

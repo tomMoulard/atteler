@@ -624,12 +624,16 @@ func TestCommandRegistry_ReviewFixSupplementalFlagsRequireFix(t *testing.T) {
 	err = validateCLICommandSelection(cliOptions{reviewFix: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "review fix requires --from")
+	assert.Contains(t, err.Error(), "--pr")
 
 	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json", reviewFixPR: "123"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "choose --from or --pr")
 
 	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json"})
+	require.NoError(t, err)
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixPR: "123"})
 	require.NoError(t, err)
 }
 
