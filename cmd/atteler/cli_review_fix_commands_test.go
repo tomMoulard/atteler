@@ -26,7 +26,7 @@ func TestRunReviewFix_AppliesSuggestedDiffAndWritesArtifacts(t *testing.T) { //n
 	runGitForReviewFixTest(t, root, "add", "example.txt")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("follow local test rules\n"), 0o600))
 
-	writeReviewFixFindingInput(t, root, reviewFixExamplePatch)
+	writeReviewFixFindingInput(t, root)
 
 	store := session.NewStore(filepath.Join(root, "sessions"))
 	state := appState{
@@ -65,7 +65,7 @@ func TestRunReviewFix_WritesValidationFailureArtifacts(t *testing.T) { //nolint:
 	require.NoError(t, os.WriteFile(filepath.Join(root, "example.txt"), []byte("old\n"), 0o600))
 	runGitForReviewFixTest(t, root, "add", "example.txt")
 
-	writeReviewFixFindingInput(t, root, reviewFixExamplePatch)
+	writeReviewFixFindingInput(t, root)
 
 	store := session.NewStore(filepath.Join(root, "sessions"))
 	state := appState{
@@ -111,7 +111,7 @@ func TestRunReviewFix_PatchArtifactSkipsPreexistingUnrelatedChanges(t *testing.T
 	runGitForReviewFixTest(t, root, "commit", "-m", "seed")
 
 	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("preexisting user change\n"), 0o600))
-	writeReviewFixFindingInput(t, root, reviewFixExamplePatch)
+	writeReviewFixFindingInput(t, root)
 
 	store := session.NewStore(filepath.Join(root, "sessions"))
 	state := appState{
@@ -152,7 +152,7 @@ func TestRunReviewFixStateful_FinalizesPreservedWorktree(t *testing.T) { //nolin
 	require.NoError(t, os.WriteFile(filepath.Join(worktreeRoot, "example.txt"), []byte("old\n"), 0o600))
 	runGitForReviewFixTest(t, worktreeRoot, "add", "example.txt")
 
-	writeReviewFixFindingInput(t, cwd, reviewFixExamplePatch)
+	writeReviewFixFindingInput(t, cwd)
 
 	store := session.NewStore(filepath.Join(cwd, "sessions"))
 	state := appState{
@@ -307,7 +307,7 @@ func TestReviewFixPatchDiff_IgnoresExcludePathsOutsideWorkspace(t *testing.T) {
 	assert.Empty(t, reviewFixRelativePath(root, outsideInput))
 }
 
-func writeReviewFixFindingInput(t *testing.T, root, diff string) {
+func writeReviewFixFindingInput(t *testing.T, root string) {
 	t.Helper()
 
 	input := map[string]any{
@@ -318,7 +318,7 @@ func writeReviewFixFindingInput(t *testing.T, root, diff string) {
 			"file":          "example.txt",
 			"line":          1,
 			"message":       "replace old content",
-			"suggested_fix": diff,
+			"suggested_fix": reviewFixExamplePatch,
 		}},
 	}
 	inputData, err := json.Marshal(input)

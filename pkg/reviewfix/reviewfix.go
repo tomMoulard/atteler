@@ -289,54 +289,14 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 		return findings, true, nil
 	}
 
-	var all []Finding
-	sawNested := false
-	for _, key := range []string{"verdict", "Verdict", "report", "Report"} {
-		if nested, ok := object[key]; ok {
-			sawNested = true
-			if nested == nil {
-				continue
-			}
-
-			findings, err := collectFindings(nested, source)
-			if err != nil {
-				return nil, true, err
-			}
-
-			all = append(all, findings...)
-		}
-	}
-
-	for _, key := range []string{"reports", "Reports"} {
-		if nested, ok := object[key]; ok {
-			sawNested = true
-			if nested == nil {
-				continue
-			}
-
-			findings, err := collectFindings(nested, source)
-			if err != nil {
-				return nil, true, err
-			}
-
-			all = append(all, findings...)
-		}
-	}
-
-	for _, key := range []string{"session", "Session"} {
-		if nested, ok := object[key]; ok {
-			sawNested = true
-			if nested == nil {
-				continue
-			}
-
-			findings, err := collectFindings(nested, source)
-			if err != nil {
-				return nil, true, err
-			}
-
-			all = append(all, findings...)
-		}
+	all, sawNested, err := collectNestedFindingKeys(object, source, []string{
+		"verdict", "Verdict",
+		"report", "Report",
+		"reports", "Reports",
+		"session", "Session",
+	})
+	if err != nil {
+		return nil, true, err
 	}
 
 	if len(all) > 0 {
@@ -347,6 +307,31 @@ func nestedFindingCollection(object map[string]any, parentSource string) ([]Find
 	}
 
 	return nil, false, nil
+}
+
+func collectNestedFindingKeys(object map[string]any, source string, keys []string) ([]Finding, bool, error) {
+	var all []Finding
+	sawNested := false
+	for _, key := range keys {
+		nested, ok := object[key]
+		if !ok {
+			continue
+		}
+
+		sawNested = true
+		if nested == nil {
+			continue
+		}
+
+		findings, err := collectFindings(nested, source)
+		if err != nil {
+			return nil, true, err
+		}
+
+		all = append(all, findings...)
+	}
+
+	return all, sawNested, nil
 }
 
 func parseFindingObject(object map[string]any, parentSource string, index int) (Finding, error) {
@@ -1122,64 +1107,19 @@ func RenderChangesMarkdown(record RunRecord) string {
 	b.WriteString("- Remote publishing: not performed\n")
 
 	b.WriteString("\n## Original findings\n\n")
-	if len(record.Findings) == 0 {
-		b.WriteString("- none recorded\n")
-	} else {
-		for i := range record.Findings {
-			finding := record.Findings[i]
-			fmt.Fprintf(&b, "- `%s` %s%s: %s\n", finding.ID, severityLabel(finding.Severity), locationSuffix(finding), finding.Message)
-			if finding.Source != "" {
-				fmt.Fprintf(&b, "  - Source: %s\n", finding.Source)
-			}
-			if finding.Evidence != "" {
-				fmt.Fprintf(&b, "  - Evidence: %s\n", firstLine(finding.Evidence))
-			}
-			if finding.SuggestedFix != "" {
-				fmt.Fprintf(&b, "  - Suggested fix: %s\n", firstLine(finding.SuggestedFix))
-			}
-			if finding.SuggestedVerification != "" {
-				fmt.Fprintf(&b, "  - Suggested verification: `%s`\n", finding.SuggestedVerification)
-			}
-		}
-	}
+	renderOriginalFindings(&b, record.Findings)
 
 	b.WriteString("\n## Groups addressed\n\n")
-	if len(record.Groups) == 0 {
-		b.WriteString("- none\n")
-	} else {
-		for _, group := range record.Groups {
-			fmt.Fprintf(&b, "- `%s` (%d findings)\n", group.Key, group.FindingCount)
-		}
-	}
+	renderGroupSummaries(&b, record.Groups)
 
 	b.WriteString("\n## Changed files\n\n")
-	if len(record.ChangedFiles) == 0 {
-		b.WriteString("- none detected\n")
-	} else {
-		for _, file := range record.ChangedFiles {
-			fmt.Fprintf(&b, "- `%s` %s\n", file.Status, file.Path)
-		}
-	}
+	renderChangedFiles(&b, record.ChangedFiles)
 
 	b.WriteString("\n## Validation\n\n")
-	if len(record.Validation) == 0 {
-		b.WriteString("- not run: no validation command supplied\n")
-	} else {
-		for i := range record.Validation {
-			result := record.Validation[i]
-			fmt.Fprintf(&b, "- `%s`: %s\n", result.Command, result.Status)
-		}
-	}
+	renderValidationSummary(&b, record.Validation)
 
 	b.WriteString("\n## Remaining known issues\n\n")
-	switch {
-	case record.ApplyError != "":
-		fmt.Fprintf(&b, "- apply/reporting issue: %s\n", record.ApplyError)
-	case validationFailed(record.Validation):
-		b.WriteString("- validation failed; inspect validation.log for command output\n")
-	default:
-		b.WriteString("- none recorded\n")
-	}
+	renderRemainingIssues(&b, record)
 
 	b.WriteString("\n## Artifacts\n\n")
 	fmt.Fprintf(&b, "- Plan: `%s`\n", record.Artifacts.FixPlan)
@@ -1188,6 +1128,81 @@ func RenderChangesMarkdown(record RunRecord) string {
 	fmt.Fprintf(&b, "- Run JSON: `%s`\n", record.Artifacts.RunJSON)
 
 	return b.String()
+}
+
+func renderOriginalFindings(b *strings.Builder, findings []Finding) {
+	if len(findings) == 0 {
+		b.WriteString("- none recorded\n")
+
+		return
+	}
+
+	for i := range findings {
+		renderOriginalFinding(b, findings[i])
+	}
+}
+
+func renderOriginalFinding(b *strings.Builder, finding Finding) {
+	fmt.Fprintf(b, "- `%s` %s%s: %s\n", finding.ID, severityLabel(finding.Severity), locationSuffix(finding), finding.Message)
+	if finding.Source != "" {
+		fmt.Fprintf(b, "  - Source: %s\n", finding.Source)
+	}
+	if finding.Evidence != "" {
+		fmt.Fprintf(b, "  - Evidence: %s\n", firstLine(finding.Evidence))
+	}
+	if finding.SuggestedFix != "" {
+		fmt.Fprintf(b, "  - Suggested fix: %s\n", firstLine(finding.SuggestedFix))
+	}
+	if finding.SuggestedVerification != "" {
+		fmt.Fprintf(b, "  - Suggested verification: `%s`\n", finding.SuggestedVerification)
+	}
+}
+
+func renderGroupSummaries(b *strings.Builder, groups []GroupSummary) {
+	if len(groups) == 0 {
+		b.WriteString("- none\n")
+
+		return
+	}
+
+	for _, group := range groups {
+		fmt.Fprintf(b, "- `%s` (%d findings)\n", group.Key, group.FindingCount)
+	}
+}
+
+func renderChangedFiles(b *strings.Builder, files []ChangedFile) {
+	if len(files) == 0 {
+		b.WriteString("- none detected\n")
+
+		return
+	}
+
+	for _, file := range files {
+		fmt.Fprintf(b, "- `%s` %s\n", file.Status, file.Path)
+	}
+}
+
+func renderValidationSummary(b *strings.Builder, results []ValidationResult) {
+	if len(results) == 0 {
+		b.WriteString("- not run: no validation command supplied\n")
+
+		return
+	}
+
+	for i := range results {
+		fmt.Fprintf(b, "- `%s`: %s\n", results[i].Command, results[i].Status)
+	}
+}
+
+func renderRemainingIssues(b *strings.Builder, record RunRecord) {
+	switch {
+	case record.ApplyError != "":
+		fmt.Fprintf(b, "- apply/reporting issue: %s\n", record.ApplyError)
+	case validationFailed(record.Validation):
+		b.WriteString("- validation failed; inspect validation.log for command output\n")
+	default:
+		b.WriteString("- none recorded\n")
+	}
 }
 
 func validationFailed(results []ValidationResult) bool {
