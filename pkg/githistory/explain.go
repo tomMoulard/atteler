@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Small explanation helpers keep closely related branches together.
 package githistory
 
 import (

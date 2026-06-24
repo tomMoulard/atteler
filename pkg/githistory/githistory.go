@@ -1,5 +1,7 @@
 // Package githistory provides git-backed history collection plus parsing and
 // explainable search over collected commits.
+//
+//nolint:cyclop,govet,wsl_v5 // Retrieval result assembly and exported structs prioritize contract readability.
 package githistory
 
 import (
@@ -21,7 +23,7 @@ const (
 	snippetRadius   = 80
 )
 
-// Commit is one git history entry parsed from git log text.
+// Commit is one collected git history entry.
 type Commit struct {
 	Date          time.Time
 	Hash          string
@@ -82,7 +84,7 @@ type Result struct {
 	Score        int
 }
 
-// Index is an in-memory lexical index over parsed commits.
+// Index is an in-memory explainable index over collected commits.
 type Index struct {
 	commits []indexedCommit
 }
@@ -92,11 +94,9 @@ type indexedCommit struct {
 	order  int
 }
 
-// ParseLog parses text produced by:
-//
-//	git log --name-only --date=iso-strict --pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e
-//
-// The package never shells out to git; callers provide captured log text.
+// ParseLog parses the legacy caller-captured git log format. New code should
+// prefer Collect so git range, path, author, date, rename, and diff semantics are
+// owned by this package instead of reconstructed by callers.
 func ParseLog(text string) ([]Commit, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, recordSeparator, "\n")
@@ -287,6 +287,12 @@ func gitRetrievalResult(result Result, query retrieval.Query) retrieval.Result {
 
 	if len(commit.Files) > 0 {
 		metadata["files"] = sanitizedGitMetadata(strings.Join(commit.Files, "\n"), source, documentID, "files", &safety)
+	}
+	if len(commit.Refs) > 0 {
+		metadata["refs"] = sanitizedGitMetadata(strings.Join(commit.Refs, "\n"), source, documentID, "refs", &safety)
+	}
+	if commit.DiffTruncated {
+		metadata["diff_truncated"] = "true"
 	}
 
 	if len(result.Snippets) > 0 {

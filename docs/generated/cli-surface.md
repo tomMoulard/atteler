@@ -200,14 +200,14 @@ Commands:
 - `agent-migrate`: explicitly migrate and re-vectorize per-agent memory (dispatch: `agent-memory`)
 - `vector-search <query>`: search a persisted lexical-fallback or embedding vector index (dispatch: `vector-search`)
 - `vector-index <file>`: chunk and add a file to the persisted vector index (dispatch: `vector-search`, `retrieval-search`)
-- `git-history <query>`: search local git history subjects/files/authors (dispatch: `git-history-search-providerless`)
+- `git-history <query>`: search local git history metadata/files/change evidence (dispatch: `git-history-search-providerless`)
 - `context-pack <path>`: compact a role-prefixed transcript file (dispatch: `context-pack`)
 
 Examples:
 - `atteler memory search "OAuth retry storm"`
 - `atteler memory retrieve "OAuth retry storm"`
 - `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`
-- `atteler memory git-history "memory regression"`
+- `atteler memory git-history "memory regression" --git-history-path pkg/memory --git-history-range v1.0..HEAD`
 - `atteler memory vector-search "redirect risks"`
 - `atteler memory vector-index docs/research.md`
 
@@ -1512,11 +1512,11 @@ Commands:
   - Outputs: `text`, `json`, `markdown`, `filesystem`, `process`
   - Fixtures:
     - `incident-file`: `atteler --incident-diagnose --incident-file incident.json` -> `incident-diagnose-providerless`
-- `git-history-search-providerless` (providerless-config): search local git history subjects, files, and authors
+- `git-history-search-providerless` (providerless-config): search local git history with git-native metadata, files, and changed-file evidence
   - Input: `gitHistorySearchCommandInput`
-  - Input fields: `Query`, `Limit`
-  - Flags: `--git-history-search`, `--git-history-limit`
-  - Examples: `atteler memory git-history "memory regression"`
+  - Input fields: `Query`, `Range`, `Refs`, `Paths`, `Authors`, `Since`, `Until`, `Limit`, `MaxHunkBytes`, `IncludeHunks`, `All`, `FirstParent`, `NoMerges`, `MergesOnly`
+  - Flags: `--git-history-search`, `--git-history-limit`, `--git-history-hunks`, `--git-history-max-hunk-bytes`, `--git-history-range`, `--git-history-ref`, `--git-history-path`, `--git-history-author`, `--git-history-since`, `--git-history-until`, `--git-history-all`, `--git-history-first-parent`, `--git-history-no-merges`, `--git-history-merges`
+  - Examples: `atteler memory git-history "memory regression" --git-history-path pkg/memory --git-history-range v1.0..HEAD`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise
   - Side effects: `git-read`, `stdout`
@@ -1525,8 +1525,8 @@ Commands:
     - `legacy-flag`: `atteler --git-history-search value` -> `git-history-search-providerless`
 - `retrieval-search` (providerless-config): search selected retrieval sources with the shared result contract
   - Input: `retrievalCommandInput`
-  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `TrustedSources`, `DeniedSources`, `VectorIndexFiles`, `Vector`, `Limit`, `Explain`, `IncludeUnsafe`, `WarnLowTrust`
-  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--trusted-source`, `--deny-source`, `--warn-low-trust`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`
+  - Input fields: `Search`, `AgentName`, `AgentMemoryAgent`, `AgentMemoryStorePath`, `MemoryStorePath`, `Filters`, `MemoryIndexFiles`, `Sources`, `TrustedSources`, `DeniedSources`, `VectorIndexFiles`, `Vector`, `GitHistory`, `Limit`, `Explain`, `IncludeUnsafe`, `WarnLowTrust`
+  - Flags: `--retrieval-search`, `--retrieval-source`, `--retrieval-filter`, `--retrieval-limit`, `--retrieval-explain`, `--retrieval-include-unsafe`, `--trusted-source`, `--deny-source`, `--warn-low-trust`, `--memory-store`, `--memory-index`, `--vector-index`, `--agent-memory-store`, `--agent-memory-agent`, `--agent`, `--vector-store`, `--vectorizer`, `--vector-provider`, `--vector-model`, `--vector-base-url`, `--vector-fallback`, `--vector-timeout-seconds`, `--vector-chunk-max-runes`, `--vector-chunk-overlap-runes`, `--git-history-hunks`, `--git-history-max-hunk-bytes`, `--git-history-range`, `--git-history-ref`, `--git-history-path`, `--git-history-author`, `--git-history-since`, `--git-history-until`, `--git-history-all`, `--git-history-first-parent`, `--git-history-no-merges`, `--git-history-merges`
   - Examples: `atteler memory retrieve "OAuth retry storm" --retrieval-source session --retrieval-filter default_model=gpt-review --retrieval-include-unsafe --retrieval-explain`
   - Conflicts:
     - `exclusive-command` with `*`: command-triggering flags are mutually exclusive unless an explicit precedence rule declares otherwise

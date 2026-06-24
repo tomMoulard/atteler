@@ -365,7 +365,7 @@ func TestSearchSessionsBlocksLowAutonomyIndexWrites(t *testing.T) {
 func TestGitHistorySearchBlocksLowAutonomyBeforeShellExecution(t *testing.T) {
 	t.Parallel()
 
-	err := runGitHistorySearch(context.Background(), t.TempDir(), "query", 1, autonomy.Low)
+	err := runGitHistorySearch(context.Background(), t.TempDir(), gitHistorySearchCommandInput{Query: "query", Limit: 1}, autonomy.Low)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "autonomy low is advisory-only")

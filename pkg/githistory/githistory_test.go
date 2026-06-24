@@ -1,8 +1,12 @@
+//nolint:gocritic,wsl_v5 // Table-style git history tests keep setup and assertions compact.
 package githistory
 
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -161,6 +165,29 @@ func TestIndex_SearchRetrievalUsesSharedContract(t *testing.T) {
 	assert.NotEmpty(t, result.Scorer.Explanation)
 }
 
+func TestIndex_SearchRetrievalIncludesRefsAndDiffMetadata(t *testing.T) {
+	t.Parallel()
+
+	commit := Commit{
+		Hash:          "abc",
+		Date:          time.Date(2026, 4, 3, 0, 0, 0, 0, time.UTC),
+		Subject:       "Release history collector",
+		Refs:          []string{"main", "tag: v1.2.3"},
+		DiffTruncated: true,
+	}
+
+	results, err := NewIndex([]Commit{commit}).SearchRetrieval(context.Background(), retrieval.Query{
+		Text:  "release",
+		Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.Equal(t, "main\ntag: v1.2.3", results[0].Metadata["refs"])
+	assert.Equal(t, "true", results[0].Metadata["diff_truncated"])
+	assert.Contains(t, results[0].Metadata["range_context"], "refs=main,tag: v1.2.3")
+}
+
 func TestIndex_SearchRetrievalRedactsSensitiveCommitText(t *testing.T) {
 	t.Parallel()
 
@@ -203,13 +230,15 @@ func TestCollect_BuildsGitLogArgsForPathDateAuthorAndRange(t *testing.T) {
 		RepoDir: "/repo",
 		Runner:  runner,
 		Query: Query{
-			Range:    "v1.0..HEAD",
-			Paths:    []string{"pkg/githistory"},
-			Authors:  []string{"Ada"},
-			Since:    since,
-			Until:    until,
-			Refs:     []string{"main"},
-			NoMerges: true,
+			Range:       "v1.0..HEAD",
+			Paths:       []string{"pkg/githistory"},
+			Authors:     []string{"Ada"},
+			Since:       since,
+			Until:       until,
+			Refs:        []string{"main"},
+			All:         true,
+			FirstParent: true,
+			NoMerges:    true,
 		},
 		MaxCommits: 25,
 	})
@@ -220,12 +249,132 @@ func TestCollect_BuildsGitLogArgsForPathDateAuthorAndRange(t *testing.T) {
 	assert.Contains(t, args, "--since="+since.Format(time.RFC3339))
 	assert.Contains(t, args, "--until="+until.Format(time.RFC3339))
 	assert.Contains(t, args, "--author=Ada")
+	assert.Contains(t, args, "--all")
+	assert.Contains(t, args, "--first-parent")
 	assert.Contains(t, args, "--no-merges")
 	assert.Contains(t, args, "--max-count=25")
 	assertLess(t, indexOf(args, "v1.0..HEAD"), indexOf(args, "--"))
 	assertLess(t, indexOf(args, "main"), indexOf(args, "--"))
 	assert.Greater(t, indexOf(args, "pkg/githistory"), indexOf(args, "--"))
 	assert.Equal(t, []string{"pkg/githistory/githistory.go"}, commits[0].Files)
+}
+
+func TestCollect_QueriesRealGitRepositoryWithPathAuthorAndDate(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git binary not available: %v", err)
+	}
+
+	root := t.TempDir()
+	runTestGit(t, root, nil, "init")
+	runTestGit(t, root, nil, "config", "user.name", "Test Committer")
+	runTestGit(t, root, nil, "config", "user.email", "committer@example.com")
+	runTestGit(t, root, nil, "config", "commit.gpgsign", "false")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "pkg"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "pkg", "target.go"), []byte("package pkg\n"), 0o600))
+	runTestGit(t, root, nil, "add", "pkg/target.go")
+	runTestGit(t, root, gitCommitEnv("Ada", "ada@example.com", "2026-04-02T12:00:00Z"), "commit", "-m", "touch target history")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "other.md"), []byte("other history\n"), 0o600))
+	runTestGit(t, root, nil, "add", "docs/other.md")
+	runTestGit(t, root, gitCommitEnv("Bob", "bob@example.com", "2026-04-03T12:00:00Z"), "commit", "-m", "touch docs history")
+
+	commits, err := Collect(context.Background(), CollectorOptions{
+		RepoDir: root,
+		Query: Query{
+			Paths:   []string{"pkg"},
+			Authors: []string{"Ada"},
+			Since:   time.Date(2026, 4, 2, 0, 0, 0, 0, time.UTC),
+			Until:   time.Date(2026, 4, 2, 23, 59, 59, 0, time.UTC),
+		},
+		MaxCommits: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
+
+	assert.Equal(t, "Ada", commits[0].AuthorName)
+	assert.Equal(t, "touch target history", commits[0].Subject)
+	assert.Equal(t, []string{"pkg/target.go"}, commits[0].Files)
+	require.Len(t, commits[0].Changes, 1)
+	assert.Equal(t, "pkg/target.go", commits[0].Changes[0].Path)
+}
+
+func TestCollect_RejectsMalformedCollectedLog(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeGitRunner{responses: map[string]string{
+		"log": "1\t0\tfile.go\n",
+	}}
+
+	_, err := Collect(context.Background(), CollectorOptions{Runner: runner})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "change listed before commit header")
+}
+
+func TestCollect_AcceptsLegacyNameOnlyPathLines(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeGitRunner{responses: map[string]string{
+		"log": "abc\x1fAda\x1fada@example.com\x1f2026-04-02T12:00:00Z\x1fTouch history\x1f\x1fmain\x1e\npkg/history.go\n",
+	}}
+
+	commits, err := Collect(context.Background(), CollectorOptions{Runner: runner})
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
+	assert.Equal(t, []string{"pkg/history.go"}, commits[0].Files)
+}
+
+func TestCollect_PreservesMultilineBodiesBeforeChangeEvidence(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeGitRunner{responses: map[string]string{
+		"log": strings.Join([]string{
+			"abc\x1fAda\x1fada@example.com\x1f2026-04-02T12:00:00Z\x1fExplain history\x1fFirst rationale line",
+			"Second rationale line mentions rollout and ownership",
+			"Refs #58\x1fmain\x1e",
+			"1\t0\tpkg/history.go",
+		}, "\n"),
+	}}
+
+	commits, err := Collect(context.Background(), CollectorOptions{Runner: runner})
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
+
+	assert.Equal(t, strings.Join([]string{
+		"First rationale line",
+		"Second rationale line mentions rollout and ownership",
+		"Refs #58",
+	}, "\n"), commits[0].Body)
+	assert.Equal(t, []string{"main"}, commits[0].Refs)
+	assert.Equal(t, []string{"pkg/history.go"}, commits[0].Files)
+	assert.Contains(t, commits[0].Relations.IssueRefs, "#58")
+}
+
+func TestCollect_DetectsAddedAndDeletedFileStatuses(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeGitRunner{responses: map[string]string{
+		"log": strings.Join([]string{
+			"abc\x1fAda\x1fada@example.com\x1f2026-04-02T12:00:00Z\x1fAdd and delete files\x1f\x1fmain\x1e",
+			"3\t0\tpkg/new.go",
+			"0\t2\tpkg/old.go",
+			" create mode 100644 pkg/new.go",
+			" delete mode 100644 pkg/old.go",
+		}, "\n"),
+	}}
+
+	commits, err := Collect(context.Background(), CollectorOptions{Runner: runner})
+	require.NoError(t, err)
+	require.Len(t, commits, 1)
+	require.Len(t, commits[0].Changes, 2)
+
+	assert.Equal(t, "added", commits[0].Changes[0].Status)
+	assert.Equal(t, "pkg/new.go", commits[0].Changes[0].Path)
+	assert.Equal(t, "deleted", commits[0].Changes[1].Status)
+	assert.Equal(t, "pkg/old.go", commits[0].Changes[1].Path)
 }
 
 func TestCollect_DetectsRenamesRevertsFixupsAndIssueRefs(t *testing.T) {
@@ -236,7 +385,7 @@ func TestCollect_DetectsRenamesRevertsFixupsAndIssueRefs(t *testing.T) {
 			"def\x1fBob\x1fbob@example.com\x1f2026-04-03T12:00:00Z\x1fRevert \"rename package\" #58\x1fThis reverts commit abc1234def5678.\x1ftag: v1.1\x1e",
 			"2\t1\tpkg/{old => new}/history.go",
 			" rename pkg/{old => new}/history.go (90%)",
-			"abc\x1fAda\x1fada@example.com\x1f2026-04-02T12:00:00Z\x1ffixup! history collector GH-58 PR-7\x1f\x1fmain\x1e",
+			"abc\x1fAda\x1fada@example.com\x1f2026-04-02T12:00:00Z\x1ffixup! history collector GH-58 PR-7\x1fPull request #99 closes #100\x1fmain\x1e",
 			"1\t0\tpkg/history.go",
 		}, "\n"),
 	}}
@@ -256,7 +405,9 @@ func TestCollect_DetectsRenamesRevertsFixupsAndIssueRefs(t *testing.T) {
 
 	assert.True(t, commits[1].Relations.Fixup)
 	assert.Contains(t, commits[1].Relations.IssueRefs, "GH-58")
+	assert.Contains(t, commits[1].Relations.IssueRefs, "#100")
 	assert.Contains(t, commits[1].Relations.PRRefs, "PR-7")
+	assert.Contains(t, commits[1].Relations.PRRefs, "#99")
 }
 
 func TestCollect_OptionalDiffHunksAreBoundedAndSanitized(t *testing.T) {
@@ -317,6 +468,25 @@ func (f *fakeGitRunner) RunGit(_ context.Context, _ string, args []string, _ *sh
 	}
 
 	return f.responses[args[0]], "", nil
+}
+
+func runTestGit(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), "git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "git %s failed:\n%s", strings.Join(args, " "), string(out))
+}
+
+func gitCommitEnv(name, email, date string) []string {
+	return []string{
+		"GIT_AUTHOR_NAME=" + name,
+		"GIT_AUTHOR_EMAIL=" + email,
+		"GIT_AUTHOR_DATE=" + date,
+		"GIT_COMMITTER_DATE=" + date,
+	}
 }
 
 func indexOf(values []string, value string) int {

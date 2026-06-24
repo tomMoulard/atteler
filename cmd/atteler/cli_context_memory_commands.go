@@ -1345,14 +1345,18 @@ func retrievalSearcher(ctx context.Context, state appState, input retrievalComma
 
 		return state.sessionStore, nil
 	case retrieval.SourceGitHistory:
-		logText, err := gitHistoryLog(ctx, state.cwd, state.autonomy)
+		query, err := gitHistoryQuery(input.GitHistory)
 		if err != nil {
 			return nil, err
 		}
 
-		commits, err := githistory.ParseLog(logText)
+		commits, err := gitHistoryCommits(ctx, state.cwd, state.autonomy, gitHistoryCollectOptions{
+			Query:        query,
+			IncludeHunks: input.GitHistory.IncludeHunks,
+			MaxHunkBytes: input.GitHistory.MaxHunkBytes,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("git history: parse log: %w", err)
+			return nil, err
 		}
 
 		requested, err := sourceVectorIndexRequested(state.vectorConfig, vector.SourceKindGitHistory)
@@ -1951,8 +1955,41 @@ func gitHistoryVectorText(commit githistory.Commit) string {
 	if len(commit.Files) > 0 {
 		writeSourceVectorLine(&b, "files", strings.Join(commit.Files, "\n"))
 	}
+	if len(commit.Changes) > 0 {
+		writeSourceVectorLine(&b, "changes", gitHistoryChangedFilesSummary(commit.Changes))
+	}
+	if relations := gitHistoryRelationsSummary(commit.Relations); relations != "" {
+		writeSourceVectorLine(&b, "relations", relations)
+	}
+	if len(commit.Refs) > 0 {
+		writeSourceVectorLine(&b, "refs", strings.Join(commit.Refs, "\n"))
+	}
+	if commit.Diff != "" {
+		writeSourceVectorLine(&b, "diff", commit.Diff)
+	}
 
 	return b.String()
+}
+
+func gitHistoryRelationsSummary(relations githistory.CommitRelations) string {
+	var parts []string
+	if relations.Fixup {
+		parts = append(parts, "fixup")
+	}
+	if relations.Squash {
+		parts = append(parts, "squash")
+	}
+	if len(relations.Reverts) > 0 {
+		parts = append(parts, "reverts="+strings.Join(relations.Reverts, ","))
+	}
+	if len(relations.IssueRefs) > 0 {
+		parts = append(parts, "issues="+strings.Join(relations.IssueRefs, ","))
+	}
+	if len(relations.PRRefs) > 0 {
+		parts = append(parts, "prs="+strings.Join(relations.PRRefs, ","))
+	}
+
+	return strings.Join(parts, " ")
 }
 
 func adrVectorSources(ctx context.Context, root string) ([]vector.Source, error) {

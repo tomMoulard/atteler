@@ -171,9 +171,22 @@ type feedbackRollbackCommandInput struct {
 	Reason      string
 }
 
+//nolint:govet // Field order follows CLI contract grouping.
 type gitHistorySearchCommandInput struct {
-	Query string
-	Limit int
+	Query        string
+	Range        string
+	Refs         []string
+	Paths        []string
+	Authors      []string
+	Since        string
+	Until        string
+	Limit        int
+	MaxHunkBytes int
+	IncludeHunks bool
+	All          bool
+	FirstParent  bool
+	NoMerges     bool
+	MergesOnly   bool
 }
 
 //nolint:govet // Field order follows grouped incident source/report controls.
@@ -322,6 +335,7 @@ type memoryCommandInput struct {
 	Compact                 bool
 }
 
+//nolint:govet // Field order follows retrieval command contract grouping.
 type retrievalCommandInput struct {
 	Search               string
 	AgentName            string
@@ -335,6 +349,7 @@ type retrievalCommandInput struct {
 	DeniedSources        []string
 	VectorIndexFiles     []string
 	Vector               retrievalVectorCommandInput
+	GitHistory           gitHistorySearchCommandInput
 	Limit                int
 	Explain              bool
 	IncludeUnsafe        bool
@@ -766,7 +781,22 @@ func feedbackRollbackCommandInputFromOptions(opts cliOptions) feedbackRollbackCo
 }
 
 func gitHistorySearchCommandInputFromOptions(opts cliOptions) gitHistorySearchCommandInput {
-	return gitHistorySearchCommandInput{Query: opts.gitHistorySearch, Limit: opts.gitHistoryLimit.value}
+	return gitHistorySearchCommandInput{
+		Query:        opts.gitHistorySearch,
+		Range:        opts.gitHistoryRange,
+		Refs:         append([]string(nil), opts.gitHistoryRefs...),
+		Paths:        append([]string(nil), opts.gitHistoryPaths...),
+		Authors:      append([]string(nil), opts.gitHistoryAuthors...),
+		Since:        opts.gitHistorySince,
+		Until:        opts.gitHistoryUntil,
+		Limit:        opts.gitHistoryLimit.value,
+		MaxHunkBytes: opts.gitHistoryMaxHunkBytes.value,
+		IncludeHunks: opts.gitHistoryIncludeHunks,
+		All:          opts.gitHistoryAll,
+		FirstParent:  opts.gitHistoryFirstParent,
+		NoMerges:     opts.gitHistoryNoMerges,
+		MergesOnly:   opts.gitHistoryMergesOnly,
+	}
 }
 
 func incidentDiagnoseCommandInputFromOptions(opts cliOptions) incidentDiagnoseCommandInput {
@@ -958,6 +988,7 @@ func retrievalCommandInputFromOptions(opts cliOptions) retrievalCommandInput {
 		AgentMemoryStorePath: opts.agentMemoryStorePath,
 		MemoryStorePath:      opts.memoryStorePath,
 		Vector:               retrievalVectorCommandInputFromOptions(opts),
+		GitHistory:           gitHistorySearchCommandInputFromOptions(opts),
 		Filters:              append([]string(nil), opts.retrievalFilters...),
 		MemoryIndexFiles:     append([]string(nil), opts.memoryIndexFiles...),
 		Sources:              append([]string(nil), opts.retrievalSources...),

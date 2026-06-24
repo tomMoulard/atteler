@@ -174,7 +174,7 @@ func providerlessConfigLocalAnalysisCommands() []command {
 			tier:  tierProviderlessConfig,
 			match: func(o cliOptions) bool { return o.gitHistorySearch != "" },
 			runProviderlessConfig: func(ctx context.Context, o cliOptions, s appState) error {
-				return runGitHistorySearch(ctx, s.cwd, o.gitHistorySearch, o.gitHistoryLimit.value, s.autonomy)
+				return runGitHistorySearch(ctx, s.cwd, gitHistorySearchCommandInputFromOptions(o), s.autonomy)
 			},
 		},
 		{

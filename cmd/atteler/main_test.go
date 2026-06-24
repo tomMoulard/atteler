@@ -1588,24 +1588,153 @@ func TestFormatGitHistoryResult(t *testing.T) {
 			Date:       time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
 			AuthorName: "Ada",
 			Subject:    "Add local git history search",
+			Changes: []githistory.ChangedFile{{
+				Path:    "pkg/githistory/new.go",
+				OldPath: "pkg/githistory/old.go",
+				Status:  "renamed",
+				Added:   3,
+				Deleted: 1,
+			}},
+			DiffTruncated: true,
 		},
-		Score:    120,
-		Snippets: []githistory.Snippet{{Field: "files", Text: "pkg/githistory/githistory.go"}},
+		Score:        120,
+		Confidence:   0.82,
+		RangeContext: "refs=main date=2026-05-01 changes=1",
+		Matches:      []githistory.MatchEvidence{{Field: "files"}, {Field: "subject"}},
+		Snippets:     []githistory.Snippet{{Field: "files", Text: "pkg/githistory/githistory.go"}},
 	}
 
 	got := formatGitHistoryResult(result)
 	for _, want := range []string{
 		"1234567890ab",
 		"score=120",
+		"confidence=0.82",
+		"matched_fields=files,subject",
+		"range=refs=main date=2026-05-01 changes=1",
 		"date=2026-05-01T12:00:00Z",
 		"author=Ada",
 		"subject=Add local git history search",
+		"changes=pkg/githistory/new.go(renamed,from=pkg/githistory/old.go,+3/-1)",
+		"diff_truncated=true",
 		"files=pkg/githistory/githistory.go",
 	} {
 		if !strings.Contains(got, want) {
 			require.Failf(t, "formatted git history missing content", "missing %q in %q", want, got)
 		}
 	}
+}
+
+func TestGitHistoryVectorTextIncludesEvidenceFields(t *testing.T) {
+	t.Parallel()
+
+	got := gitHistoryVectorText(githistory.Commit{
+		Hash:    "abc123",
+		Subject: "Rename collector",
+		Changes: []githistory.ChangedFile{{
+			Path:    "pkg/new/history.go",
+			OldPath: "pkg/old/history.go",
+			Status:  "renamed",
+			Added:   4,
+			Deleted: 2,
+		}},
+		Relations: githistory.CommitRelations{
+			Reverts:   []string{"def456"},
+			IssueRefs: []string{"GH-58"},
+			PRRefs:    []string{"PR-7"},
+			Fixup:     true,
+		},
+		Refs: []string{"main", "tag: v1"},
+		Diff: "@@ -1 +1 @@\n-old\n+new",
+	})
+
+	for _, want := range []string{
+		"subject: Rename collector",
+		"changes: pkg/new/history.go(renamed,from=pkg/old/history.go,+4/-2)",
+		"relations: fixup reverts=def456 issues=GH-58 prs=PR-7",
+		"refs: main",
+		"tag: v1",
+		"diff: @@ -1 +1 @@",
+	} {
+		assert.Contains(t, got, want)
+	}
+}
+
+func TestGitHistorySearchCommandInputFromOptionsCarriesGitSemantics(t *testing.T) {
+	t.Parallel()
+
+	got := gitHistorySearchCommandInputFromOptions(cliOptions{
+		gitHistorySearch:       "rename collector",
+		gitHistoryRange:        "v1..HEAD",
+		gitHistoryRefs:         stringListFlag{"main", "release"},
+		gitHistoryPaths:        stringListFlag{"pkg/githistory"},
+		gitHistoryAuthors:      stringListFlag{"Ada"},
+		gitHistorySince:        "2026-04-01",
+		gitHistoryUntil:        "2026-04-30",
+		gitHistoryIncludeHunks: true,
+		gitHistoryAll:          true,
+		gitHistoryFirstParent:  true,
+		gitHistoryNoMerges:     true,
+		gitHistoryLimit:        positiveIntFlag{value: 7, set: true},
+		gitHistoryMaxHunkBytes: positiveIntFlag{value: 1024, set: true},
+	})
+
+	assert.Equal(t, "rename collector", got.Query)
+	assert.Equal(t, "v1..HEAD", got.Range)
+	assert.Equal(t, []string{"main", "release"}, got.Refs)
+	assert.Equal(t, []string{"pkg/githistory"}, got.Paths)
+	assert.Equal(t, []string{"Ada"}, got.Authors)
+	assert.Equal(t, "2026-04-01", got.Since)
+	assert.Equal(t, "2026-04-30", got.Until)
+	assert.Equal(t, 7, got.Limit)
+	assert.Equal(t, 1024, got.MaxHunkBytes)
+	assert.True(t, got.IncludeHunks)
+	assert.True(t, got.All)
+	assert.True(t, got.FirstParent)
+	assert.True(t, got.NoMerges)
+}
+
+func TestGitHistoryQueryMapsGitNativeConstraints(t *testing.T) {
+	t.Parallel()
+
+	got, err := gitHistoryQuery(gitHistorySearchCommandInput{
+		Range:        " v1.0..HEAD ",
+		Refs:         []string{"main", "tag:v1.1"},
+		Paths:        []string{"pkg/githistory"},
+		Authors:      []string{"Ada"},
+		Since:        "2026-04-01",
+		Until:        "2026-04-02T12:00:00Z",
+		IncludeHunks: true,
+		All:          true,
+		FirstParent:  true,
+		NoMerges:     true,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "v1.0..HEAD", got.Range)
+	assert.Equal(t, []string{"main", "tag:v1.1"}, got.Refs)
+	assert.Equal(t, []string{"pkg/githistory"}, got.Paths)
+	assert.Equal(t, []string{"Ada"}, got.Authors)
+	assert.Equal(t, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC), got.Since)
+	assert.Equal(t, time.Date(2026, 4, 2, 12, 0, 0, 0, time.UTC), got.Until)
+	assert.True(t, got.All)
+	assert.True(t, got.FirstParent)
+	assert.True(t, got.NoMerges)
+}
+
+func TestGitHistoryQueryRejectsConflictingMergeFilters(t *testing.T) {
+	t.Parallel()
+
+	_, err := gitHistoryQuery(gitHistorySearchCommandInput{NoMerges: true, MergesOnly: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot both be set")
+}
+
+func TestGitHistoryQueryRejectsBadDateBound(t *testing.T) {
+	t.Parallel()
+
+	_, err := gitHistoryQuery(gitHistorySearchCommandInput{Since: "last tuesday"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "git-history-since")
 }
 
 func TestGitHistoryAuditContextIncludesAutonomy(t *testing.T) {

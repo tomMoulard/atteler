@@ -1,3 +1,4 @@
+//nolint:cyclop,gocognit,gocritic,govet,modernize,staticcheck,wrapcheck,wsl_v5 // Git history parsing keeps related git-format branches close for auditability.
 package githistory
 
 import (
@@ -43,6 +44,8 @@ type CollectorOptions struct {
 	MaxCommits   int
 	MaxHunkBytes int
 	IncludeHunks bool
+	RedactOutput func(string) string
+	OutputNote   string
 }
 
 // GitRunner executes git with already-tokenized arguments.
@@ -50,7 +53,10 @@ type GitRunner interface {
 	RunGit(context.Context, string, []string, *shell.Policy, shell.AuditContext) (stdout string, stderr string, err error)
 }
 
-type shellGitRunner struct{}
+type shellGitRunner struct {
+	RedactOutput func(string) string
+	OutputNote   string
+}
 
 // Collect queries git directly and returns parsed commits with metadata,
 // changed files, relationship signals, and optional bounded diff hunks.
@@ -61,7 +67,10 @@ func Collect(ctx context.Context, opts CollectorOptions) ([]Commit, error) {
 
 	runner := opts.Runner
 	if runner == nil {
-		runner = shellGitRunner{}
+		runner = shellGitRunner{
+			RedactOutput: opts.RedactOutput,
+			OutputNote:   opts.OutputNote,
+		}
 	}
 
 	args := logArgs(opts)
@@ -101,7 +110,7 @@ func Collect(ctx context.Context, opts CollectorOptions) ([]Commit, error) {
 	return commits, nil
 }
 
-func (shellGitRunner) RunGit(ctx context.Context, dir string, args []string, policy *shell.Policy, audit shell.AuditContext) (string, string, error) {
+func (r shellGitRunner) RunGit(ctx context.Context, dir string, args []string, policy *shell.Policy, audit shell.AuditContext) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 
 	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
@@ -119,11 +128,19 @@ func (shellGitRunner) RunGit(ctx context.Context, dir string, args []string, pol
 	}
 
 	runErr := cmd.Run()
+	auditStdout := stdout.String()
+	auditStderr := stderr.String()
+	if r.RedactOutput != nil {
+		auditStdout = r.RedactOutput(auditStdout)
+		auditStderr = r.RedactOutput(auditStderr)
+	}
+
 	finishErr := invocation.Finish(shell.FinishOptions{
-		Stdout:        stdout.String(),
-		Stderr:        stderr.String(),
+		Stdout:        auditStdout,
+		Stderr:        auditStderr,
 		Error:         runErr,
 		OutputCapture: shell.OutputCaptured,
+		OutputNote:    r.OutputNote,
 	})
 	if finishErr != nil {
 		return stdout.String(), stderr.String(), finishErr
@@ -195,16 +212,35 @@ func logArgs(opts CollectorOptions) []string {
 
 func parseCollectedLog(text string) ([]Commit, error) {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, recordSeparator, "\n")
 
 	var (
-		commits []Commit
-		current *Commit
+		commits          []Commit
+		current          *Commit
+		headerLines      []string
+		collectingHeader bool
 	)
 
 	for lineNumber, rawLine := range strings.Split(text, "\n") {
 		line := strings.TrimRight(rawLine, "\r")
 		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		if collectingHeader {
+			headerLines = append(headerLines, line)
+			if !strings.Contains(line, recordSeparator) {
+				continue
+			}
+
+			commit, err := parseCollectedHeaderBlock(headerLines)
+			if err != nil {
+				return nil, fmt.Errorf("githistory: parse collected line %d: %w", lineNumber+1, err)
+			}
+
+			current = &commit
+			headerLines = nil
+			collectingHeader = false
+
 			continue
 		}
 
@@ -214,7 +250,15 @@ func parseCollectedLog(text string) ([]Commit, error) {
 				commits = append(commits, cloneCommit(*current))
 			}
 
-			commit, err := parseCollectedHeader(line)
+			headerLines = []string{line}
+			if !strings.Contains(line, recordSeparator) {
+				collectingHeader = true
+				current = nil
+
+				continue
+			}
+
+			commit, err := parseCollectedHeaderBlock(headerLines)
 			if err != nil {
 				return nil, fmt.Errorf("githistory: parse collected line %d: %w", lineNumber+1, err)
 			}
@@ -238,6 +282,16 @@ func parseCollectedLog(text string) ([]Commit, error) {
 
 		if oldPath, newPath, ok := parseRenameSummary(line); ok {
 			mergeRename(current, oldPath, newPath)
+			continue
+		}
+
+		if path, status, ok := parseModeSummary(line); ok {
+			mergeChangeStatus(current, path, status)
+			continue
+		}
+
+		if legacyPathLine(line) {
+			current.Files = appendUnique(current.Files, line)
 		}
 	}
 
@@ -245,8 +299,24 @@ func parseCollectedLog(text string) ([]Commit, error) {
 		finalizeCollectedCommit(current)
 		commits = append(commits, cloneCommit(*current))
 	}
+	if collectingHeader {
+		commit, err := parseCollectedHeaderBlock(headerLines)
+		if err != nil {
+			return nil, fmt.Errorf("githistory: parse collected line %d: %w", len(strings.Split(text, "\n")), err)
+		}
+
+		finalizeCollectedCommit(&commit)
+		commits = append(commits, cloneCommit(commit))
+	}
 
 	return commits, nil
+}
+
+func parseCollectedHeaderBlock(lines []string) (Commit, error) {
+	block := strings.Join(lines, "\n")
+	header, _, _ := strings.Cut(block, recordSeparator)
+
+	return parseCollectedHeader(header)
 }
 
 func parseCollectedHeader(line string) (Commit, error) {
@@ -328,6 +398,35 @@ func parseRenameSummary(line string) (oldPath, newPath string, ok bool) {
 	return oldPath, newPath, oldPath != "" && newPath != ""
 }
 
+func parseModeSummary(line string) (path, status string, ok bool) {
+	line = strings.TrimSpace(line)
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[1] != "mode" {
+		return "", "", false
+	}
+
+	switch fields[0] {
+	case "create":
+		status = "added"
+	case "delete":
+		status = "deleted"
+	default:
+		return "", "", false
+	}
+
+	path = normalizeRenamePath(strings.Join(fields[3:], " "))
+	return path, status, path != ""
+}
+
+func legacyPathLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.Contains(line, " ") {
+		return false
+	}
+
+	return strings.Contains(line, "/") || strings.Contains(line, ".")
+}
+
 func finalizeCollectedCommit(commit *Commit) {
 	commit.Relations = inferRelations(commit.Hash, commit.Subject+"\n"+commit.Body)
 }
@@ -345,7 +444,11 @@ func inferRelations(hash, text string) CommitRelations {
 		token = strings.TrimSpace(token)
 		lower := strings.ToLower(token)
 		if strings.HasPrefix(token, "#") && len(token) > 1 {
-			relations.IssueRefs = appendUnique(relations.IssueRefs, token)
+			if hashRefLooksPullRequest(text, token) {
+				relations.PRRefs = appendUnique(relations.PRRefs, token)
+			} else {
+				relations.IssueRefs = appendUnique(relations.IssueRefs, token)
+			}
 			continue
 		}
 		if strings.HasPrefix(lower, "gh-") && len(token) > 3 {
@@ -361,6 +464,29 @@ func inferRelations(hash, text string) CommitRelations {
 	}
 
 	return relations
+}
+
+func hashRefLooksPullRequest(text, token string) bool {
+	lowerText := strings.ToLower(text)
+	lowerToken := strings.ToLower(token)
+
+	for offset := 0; ; {
+		idx := strings.Index(lowerText[offset:], lowerToken)
+		if idx < 0 {
+			return false
+		}
+
+		idx += offset
+		prefix := lowerText[:idx]
+		if len(prefix) > 32 {
+			prefix = prefix[len(prefix)-32:]
+		}
+		if strings.HasSuffix(prefix, "pull request ") || strings.HasSuffix(prefix, "pr ") {
+			return true
+		}
+
+		offset = idx + len(lowerToken)
+	}
 }
 
 func revertedHash(text string) string {
@@ -403,6 +529,27 @@ func mergeRename(commit *Commit, oldPath, newPath string) {
 		Renamed: true,
 	})
 	commit.Files = appendUnique(appendUnique(commit.Files, oldPath), newPath)
+}
+
+func mergeChangeStatus(commit *Commit, path, status string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+
+	for i := range commit.Changes {
+		if commit.Changes[i].Path == path {
+			commit.Changes[i].Status = status
+			commit.Files = appendUnique(commit.Files, path)
+			return
+		}
+	}
+
+	commit.Changes = append(commit.Changes, ChangedFile{
+		Path:   path,
+		Status: status,
+	})
+	commit.Files = appendUnique(commit.Files, path)
 }
 
 func boundedSanitizedDiff(hash, diff string, maxBytes int) (string, bool) {
