@@ -91,8 +91,8 @@ the stable compatibility promise: `pkg/agent`, `pkg/agentmemory`,
 `pkg/codegraph`, `pkg/codeintel`, `pkg/config`, `pkg/contextpack`,
 `pkg/contextref`, `pkg/eval`, `pkg/feedback`, `pkg/githistory`,
 `pkg/incident`, `pkg/issuewatch`, `pkg/lsp`, `pkg/mcp`, `pkg/modelroute`,
-`pkg/privacy`, `pkg/promptcomplete`, `pkg/research`, `pkg/shell`,
-`pkg/skill`, `pkg/sourcepolicy`, `pkg/speculate`, `pkg/subagent`,
+`pkg/privacy`, `pkg/promptcomplete`, `pkg/research`, `pkg/reviewfix`,
+`pkg/shell`, `pkg/skill`, `pkg/sourcepolicy`, `pkg/speculate`, `pkg/subagent`,
 `pkg/symphony`, `pkg/tasklist`, `pkg/vector`, and `pkg/watch`.
 
 If an integration needs one of these to become stable, open an issue describing

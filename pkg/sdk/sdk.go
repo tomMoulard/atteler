@@ -137,6 +137,7 @@ var packageContracts = []PackageContract{
 	experimentalPackageContract("privacy", "conservative redaction helpers"),
 	experimentalPackageContract("promptcomplete", "deterministic prompt-line completion"),
 	experimentalPackageContract("research", "local-first research artifact creation"),
+	experimentalPackageContract("reviewfix", "review finding normalization, repair planning, and artifact rendering"),
 	experimentalPackageContract("shell", "policy-gated process execution and audit records"),
 	experimentalPackageContract("skill", "skill filesystem helpers"),
 	experimentalPackageContract("sourcepolicy", "harness source-policy discovery"),
