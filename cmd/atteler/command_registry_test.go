@@ -85,7 +85,7 @@ func TestCommandRegistry_TopLevelRegistryStaysSmall(t *testing.T) {
 	t.Parallel()
 
 	registry := buildCommandRegistry()
-	assert.LessOrEqual(t, len(registry), 54, "top-level command registry should stay grouped by domain instead of one entry per flag")
+	assert.LessOrEqual(t, len(registry), 55, "top-level command registry should stay grouped by domain instead of one entry per flag")
 }
 
 func TestCommandRegistry_ContractsAreWellFormed(t *testing.T) {
@@ -611,6 +611,29 @@ func TestCommandRegistry_IncidentSupplementalFlagsRequireDiagnose(t *testing.T) 
 		incidentOpenPR:             true,
 		incidentValidationCommands: rawStringListFlag{"go test ./..."},
 	})
+	require.NoError(t, err)
+}
+
+func TestCommandRegistry_ReviewFixSupplementalFlagsRequireFix(t *testing.T) {
+	t.Parallel()
+
+	err := validateCLICommandSelection(cliOptions{reviewFixFrom: "review.json"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review fix flags require --review-fix")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "review fix requires --from")
+	assert.Contains(t, err.Error(), "--pr")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json", reviewFixPR: "123"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choose --from or --pr")
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixFrom: "review.json"})
+	require.NoError(t, err)
+
+	err = validateCLICommandSelection(cliOptions{reviewFix: true, reviewFixPR: "123"})
 	require.NoError(t, err)
 }
 
@@ -1959,6 +1982,12 @@ func TestCommandRegistry_GroupedCommandsWithSupplementalFlagsReachExpectedHandle
 			name:     "review run routes stateful when executed",
 			args:     []string{"review", "run"},
 			wantName: "review-run",
+			wantTier: tierStateful,
+		},
+		{
+			name:     "review fix routes stateful with findings input",
+			args:     []string{"review", "fix", "--from", "review.json"},
+			wantName: "review-fix",
 			wantTier: tierStateful,
 		},
 		{

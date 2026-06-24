@@ -58,6 +58,16 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--review-plan", "--review-agent", "quality-reviewer"},
 		},
 		{
+			name: "review fix maps from and validation flags",
+			args: []string{"review", "fix", "--from", "review.json", "--validate", "go test ./..."},
+			want: []string{"--review-fix", "--from", "review.json", "--validate", "go test ./..."},
+		},
+		{
+			name: "review fix preserves worktree isolation flag",
+			args: []string{"review", "fix", "--from", "review.json", "--worktree", "--validate", "go test ./..."},
+			want: []string{"--review-fix", "--from", "review.json", "--worktree", "--validate", "go test ./..."},
+		},
+		{
 			name: "plugin string command",
 			args: []string{"plugins", "run", "reviewer/check", "--plugin-dry-run"},
 			want: []string{"--run-plugin", "reviewer/check", "--plugin-dry-run"},

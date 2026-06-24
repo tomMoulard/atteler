@@ -14,11 +14,15 @@ func validateCLICommandSelection(opts cliOptions) error {
 		return err
 	}
 
+	if err := validateHeadlessCommandSelection(opts); err != nil {
+		return err
+	}
+
 	if err := validateIncidentCommandSelection(opts); err != nil {
 		return err
 	}
 
-	if err := validateHeadlessCommandSelection(opts); err != nil {
+	if err := validateReviewFixCommandSelection(opts); err != nil {
 		return err
 	}
 
