@@ -1243,6 +1243,69 @@ func TestCodexChatGPTAuthRefresh_PermissionDenialIsAudited(t *testing.T) {
 	assert.NotContains(t, audit, "refresh-token-secret")
 }
 
+func TestCodexChatGPTAuthRefresh_AdoptsRotatedDiskTokens(t *testing.T) {
+	t.Parallel()
+
+	// The network refresh must NOT run: when another client has already rotated
+	// fresh tokens onto the shared auth.json, our in-memory refresh_token is
+	// likely invalidated, so we must adopt the on-disk tokens instead.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		assert.Fail(t, "network refresh must not run when disk holds fresher tokens")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	ctx := permissiveCredentialContext(context.Background())
+	authPath := writeCodexAuthFile(t, "access-old", "refresh-old", "acct-old")
+
+	auth, err := loadCodexChatGPTAuthContext(ctx, filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	auth.refreshURL = srv.URL
+	auth.httpClient = srv.Client()
+
+	// Another client (e.g. a running codex CLI) rotates the shared auth.json.
+	rotated := `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,` +
+		`"tokens":{"access_token":"access-new","refresh_token":"refresh-new","account_id":"acct-new"}}`
+	require.NoError(t, os.WriteFile(authPath, []byte(rotated), 0o600))
+
+	require.NoError(t, auth.refresh(ctx, "access-old"))
+
+	access, account := auth.snapshot()
+	assert.Equal(t, "access-new", access)
+	assert.Equal(t, "acct-new", account)
+	assert.Equal(t, "refresh-new", auth.refreshToken)
+}
+
+func TestCodexChatGPTAuthRefresh_FallsBackToNetworkWhenDiskUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// Disk still holds the same (stale) token, so no other client rotated it:
+	// the real network refresh must run and its result must be adopted.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(
+			`{"access_token":"access-refreshed","refresh_token":"refresh-refreshed","id_token":"id-refreshed"}`,
+		))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	ctx := permissiveCredentialContext(context.Background())
+	authPath := writeCodexAuthFile(t, "access-old", "refresh-old", "acct-old")
+
+	auth, err := loadCodexChatGPTAuthContext(ctx, filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	auth.refreshURL = srv.URL
+	auth.httpClient = srv.Client()
+
+	require.NoError(t, auth.refresh(ctx, "access-old"))
+
+	access, _ := auth.snapshot()
+	assert.Equal(t, "access-refreshed", access)
+	assert.Equal(t, "refresh-refreshed", auth.refreshToken)
+}
+
 func TestResolveOpenAIKey_NoCreds(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "")
 

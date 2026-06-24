@@ -1231,6 +1231,13 @@ func (a *codexChatGPTAuth) hasRefreshToken() bool {
 // new state back to auth.json. The caller may pass a previously observed
 // access token to skip the refresh if another goroutine has already refreshed.
 //
+// Before spending our refresh_token, it re-reads auth.json from disk: ChatGPT
+// OAuth refresh tokens are single-use/rotating, so another client sharing this
+// file (most commonly a running codex CLI) may have already rotated fresh
+// tokens onto disk and invalidated the refresh_token we hold in memory. In that
+// case we adopt the on-disk tokens and skip the network refresh entirely, which
+// is what keeps a long-lived atteler process from getting stranded.
+//
 //nolint:cyclop,gocognit,nestif,wsl_v5 // Security-sensitive linear validate/request/persist flow; splitting would obscure the audit sequence.
 func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) error {
 	if err := requireCredentialContext(ctx); err != nil {
@@ -1242,6 +1249,12 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 
 	if observedAccess != "" && observedAccess != a.accessToken {
 		// Another caller refreshed concurrently; the stored token is already new.
+		return nil
+	}
+
+	if a.adoptDiskTokensLocked(ctx) {
+		// Another client already rotated fresh tokens onto disk; adopt them
+		// instead of spending our (likely invalidated) refresh_token.
 		return nil
 	}
 
@@ -1412,6 +1425,45 @@ type codexAuthState struct {
 	accessToken  string
 	refreshToken string
 	accountID    string
+}
+
+// adoptDiskTokensLocked re-reads auth.json and adopts its tokens when another
+// client (e.g. a running codex CLI) has rotated in a fresher access token since
+// we last loaded the file. It reports whether it adopted a different access
+// token, in which case the caller can retry the request without a network
+// refresh. A changed access token reliably signals a rotation because every
+// refresh re-issues the access token alongside the refresh token.
+//
+// The mutex must be held by the caller. Read or parse failures are treated as
+// "nothing to adopt" so the caller falls back to the normal network refresh.
+func (a *codexChatGPTAuth) adoptDiskTokensLocked(ctx context.Context) bool {
+	if a.authPath == "" {
+		return false
+	}
+
+	disk, err := loadCodexChatGPTAuthWithConfigContext(
+		ctx,
+		filepath.Dir(a.authPath),
+		ProviderConfig{CredentialPolicy: a.credentialPolicy},
+	)
+	if err != nil {
+		return false
+	}
+
+	if disk.accessToken == "" || disk.accessToken == a.accessToken {
+		return false
+	}
+
+	a.accessToken = disk.accessToken
+	if disk.refreshToken != "" {
+		a.refreshToken = disk.refreshToken
+	}
+
+	if disk.accountID != "" {
+		a.accountID = disk.accountID
+	}
+
+	return true
 }
 
 // persistRefreshedCodexAuth merges the refreshed tokens into auth.json while
