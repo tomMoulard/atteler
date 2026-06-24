@@ -61,7 +61,7 @@ func ResolveAnthropicKey() (key string, bearer bool, err error) {
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
 func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, err error) {
-	return resolveAnthropicKeyContext(ctx, !borrowedAnthropicCredentialsDisabled(ProviderConfig{}))
+	return resolveAnthropicKeyContext(ctx, ProviderConfig{}, !borrowedAnthropicCredentialsDisabled(ProviderConfig{}))
 }
 
 // ResolveAnthropicKeyWithConfigContext resolves Anthropic credentials while
@@ -70,12 +70,30 @@ func ResolveAnthropicKeyContext(ctx context.Context) (key string, bearer bool, e
 // available so disabling private adapters does not disable the normal Anthropic
 // provider.
 func ResolveAnthropicKeyWithConfigContext(ctx context.Context, cfg ProviderConfig) (key string, bearer bool, err error) {
-	return resolveAnthropicKeyContext(ctx, !borrowedAnthropicCredentialsDisabled(cfg))
+	return resolveAnthropicKeyContext(ctx, cfg, !borrowedAnthropicCredentialsDisabled(cfg))
 }
 
-func resolveAnthropicKeyContext(ctx context.Context, allowBorrowedCredentials bool) (key string, bearer bool, err error) {
+func resolveAnthropicKeyWithProvenanceContext(
+	ctx context.Context,
+	cfg ProviderConfig,
+) (key string, bearer bool, provenance credentialProvenance, err error) {
+	return resolveAnthropicKeyWithProvenance(ctx, cfg, !borrowedAnthropicCredentialsDisabled(cfg))
+}
+
+func resolveAnthropicKeyContext(ctx context.Context, cfg ProviderConfig, allowBorrowedCredentials bool) (key string, bearer bool, err error) {
+	key, bearer, _, err = resolveAnthropicKeyWithProvenance(ctx, cfg, allowBorrowedCredentials)
+
+	return key, bearer, err
+}
+
+//nolint:cyclop,gocognit // Credential precedence intentionally stays explicit and auditable.
+func resolveAnthropicKeyWithProvenance(
+	ctx context.Context,
+	cfg ProviderConfig,
+	allowBorrowedCredentials bool,
+) (key string, bearer bool, provenance credentialProvenance, err error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return "", false, err
+		return "", false, credentialProvenance{}, err
 	}
 
 	if policyErr := authorizeProviderPermission(
@@ -85,43 +103,100 @@ func resolveAnthropicKeyContext(ctx context.Context, allowBorrowedCredentials bo
 		"ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN/borrowed credential stores",
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
-		return "", false, policyErr
+		return "", false, credentialProvenance{}, policyErr
 	}
 
 	if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-		return v, false, nil
+		source := credentialSource{
+			Provider:    providerAnthropic,
+			Store:       CredentialStoreEnv,
+			Description: "ANTHROPIC_API_KEY",
+			Location:    "env:ANTHROPIC_API_KEY",
+		}
+		if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionUse); err != nil {
+			return "", false, credentialProvenance{}, err
+		}
+
+		return v, false, credentialProvenance{
+			Provider: providerAnthropic,
+			Store:    CredentialStoreEnv,
+			Location: "env:ANTHROPIC_API_KEY",
+		}, nil
 	}
 
 	if v := os.Getenv("ANTHROPIC_AUTH_TOKEN"); v != "" {
-		return v, true, nil
+		source := credentialSource{
+			Provider:    providerAnthropic,
+			Store:       CredentialStoreEnv,
+			Description: "ANTHROPIC_AUTH_TOKEN",
+			Location:    "env:ANTHROPIC_AUTH_TOKEN",
+		}
+		if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionUse); err != nil {
+			return "", false, credentialProvenance{}, err
+		}
+
+		return v, true, credentialProvenance{
+			Provider: providerAnthropic,
+			Store:    CredentialStoreEnv,
+			Location: "env:ANTHROPIC_AUTH_TOKEN",
+		}, nil
 	}
 
 	if !allowBorrowedCredentials {
-		return "", false, errors.New(
+		return "", false, credentialProvenance{}, errors.New(
 			"no Anthropic API credentials found: borrowed Claude Code/Forge credential stores are disabled; set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN",
 		)
 	}
 
 	if v := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); v != "" {
-		return v, true, nil
+		source := credentialSource{
+			Provider:      providerAnthropic,
+			Store:         CredentialStoreEnv,
+			Description:   "CLAUDE_CODE_OAUTH_TOKEN",
+			Location:      "env:CLAUDE_CODE_OAUTH_TOKEN",
+			BorrowedOAuth: true,
+		}
+		if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionUse); err != nil {
+			return "", false, credentialProvenance{}, err
+		}
+
+		return v, true, credentialProvenance{
+			Provider:      providerAnthropic,
+			Store:         CredentialStoreEnv,
+			Location:      "env:CLAUDE_CODE_OAUTH_TOKEN",
+			BorrowedOAuth: true,
+		}, nil
 	}
+
+	var sourcePolicyFailures []error
 
 	// Try loading from ForgeCode's credential store. Forge stores provider
 	// login state in FORGE_CONFIG/.credentials.json or the default config dir.
-	if tok, isBearer, err := resolveForgeAnthropicCredentials(ctx); err == nil && tok != "" {
-		return tok, isBearer, nil
+	if tok, isBearer, source, err := resolveForgeAnthropicCredentials(ctx, cfg); err == nil && tok != "" {
+		return tok, isBearer, source, nil
 	} else if isBlockingCredentialResolutionError(err) {
-		return "", false, err
+		return "", false, credentialProvenance{}, err
+	} else if err != nil && containsCredentialSourcePolicyError(err) {
+		sourcePolicyFailures = append(sourcePolicyFailures, err)
 	}
 
 	// Try loading from Claude Code's local credential store.
-	if tok, err := resolveClaudeCodeCredentials(ctx); err == nil && tok != "" {
-		return tok, true, nil
+	if tok, source, err := resolveClaudeCodeCredentialsWithProvenance(ctx, cfg); err == nil && tok != "" {
+		return tok, true, source, nil
 	} else if isBlockingCredentialResolutionError(err) {
-		return "", false, err
+		return "", false, credentialProvenance{}, err
+	} else if err != nil && containsCredentialSourcePolicyError(err) {
+		sourcePolicyFailures = append(sourcePolicyFailures, err)
 	}
 
-	return "", false, errors.New(
+	if len(sourcePolicyFailures) > 0 {
+		return "", false, credentialProvenance{}, fmt.Errorf(
+			"no Anthropic credentials available from allowed credential sources: %w; set ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN or configure providers.anthropic.credential_policy.allowed_stores",
+			errors.Join(sourcePolicyFailures...),
+		)
+	}
+
+	return "", false, credentialProvenance{}, errors.New(
 		"no Anthropic credentials found: set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, " +
 			"CLAUDE_CODE_OAUTH_TOKEN, log in with `forge provider login claude_code`, or log in with `claude` CLI",
 	)
@@ -132,7 +207,7 @@ func isContextError(err error) bool {
 }
 
 func isBlockingCredentialResolutionError(err error) bool {
-	return isContextError(err) || permission.ErrDenied(err)
+	return isContextError(err) || permission.ErrDenied(err) || isBlockingCredentialSourcePolicyError(err)
 }
 
 func borrowedAnthropicCredentialsDisabled(cfg ProviderConfig) bool {
@@ -176,24 +251,57 @@ func parseClaudeCodeCredentialsRaw(data []byte) (claudeOAuthBlock, error) {
 }
 
 // resolveClaudeCodeCredentials tries platform-specific credential stores.
-func resolveClaudeCodeCredentials(ctx context.Context) (string, error) {
+func resolveClaudeCodeCredentialsWithProvenance(ctx context.Context, cfg ProviderConfig) (string, credentialProvenance, error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return "", err
+		return "", credentialProvenance{}, err
 	}
 
 	// macOS: read from Keychain.
 	if runtime.GOOS == "darwin" {
-		if tok, err := readClaudeCodeKeychain(ctx); err == nil {
-			return tok, nil
+		source := credentialSource{
+			Provider:      providerAnthropic,
+			Store:         CredentialStoreClaudeCodeKeychain,
+			Description:   "Claude Code keychain OAuth",
+			Location:      claudeCodeKeychainSource,
+			BorrowedOAuth: true,
+		}
+
+		keychainErr := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRead)
+		if keychainErr == nil {
+			if tok, err := readClaudeCodeKeychain(ctx); err == nil {
+				return tok, credentialProvenance{
+					Provider:      providerAnthropic,
+					Store:         CredentialStoreClaudeCodeKeychain,
+					Location:      claudeCodeKeychainSource,
+					BorrowedOAuth: true,
+				}, nil
+			}
+		} else if isBlockingCredentialResolutionError(keychainErr) {
+			return "", credentialProvenance{}, keychainErr
 		}
 	}
 
 	// Linux / Windows / fallback: read plaintext credentials file.
-	return readClaudeCodeCredentialsFile(ctx)
+	token, err := readClaudeCodeCredentialsFile(ctx, cfg)
+	if err != nil {
+		return "", credentialProvenance{}, err
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", credentialProvenance{}, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	return token, credentialProvenance{
+		Provider:      providerAnthropic,
+		Store:         CredentialStoreClaudeCodeFile,
+		Location:      filepath.Join(home, ".claude", ".credentials.json"),
+		BorrowedOAuth: true,
+	}, nil
 }
 
 // readClaudeCodeCredentialsFile reads ~/.claude/.credentials.json (Linux/Windows).
-func readClaudeCodeCredentialsFile(ctx context.Context) (string, error) {
+func readClaudeCodeCredentialsFile(ctx context.Context, cfg ProviderConfig) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return "", err
 	}
@@ -204,13 +312,23 @@ func readClaudeCodeCredentialsFile(ctx context.Context) (string, error) {
 	}
 
 	path := filepath.Join(home, ".claude", ".credentials.json")
+	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:      providerAnthropic,
+		Store:         CredentialStoreClaudeCodeFile,
+		Description:   "Claude Code credentials file",
+		Location:      path,
+		BorrowedOAuth: true,
+	}, credentialActionRead); sourceErr != nil {
+		return "", sourceErr
+	}
+
 	if policyErr := authorizeProviderCredentialFileRead(ctx, providerClaudeCode, "read Claude Code credentials file", path); policyErr != nil {
 		return "", policyErr
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot read Claude Code credentials: %w", err)
+		return "", fmt.Errorf("cannot read Claude Code credentials: %s", redactCredentialPathError(err))
 	}
 
 	if err := requireCredentialContext(ctx); err != nil {
@@ -252,6 +370,8 @@ type forgeCredentialEntry struct {
 	ID               string           `json:"id"`
 	AuthDetails      forgeAuthDetails `json:"auth_details"`
 	AuthDetailsCamel forgeAuthDetails `json:"authDetails"`
+	URLParams        forgeURLParams   `json:"url_params"`
+	URLParamsCamel   forgeURLParams   `json:"urlParams"`
 }
 
 type forgeAuthDetails struct {
@@ -285,6 +405,13 @@ type forgeOAuthTokens struct {
 	ExpiresCamel string `json:"expiresAt"`
 }
 
+type forgeURLParams struct {
+	UserID       string `json:"user_id"`
+	UserIDCamel  string `json:"userId"`
+	AccountID    string `json:"account_id"`
+	AccountCamel string `json:"accountId"`
+}
+
 const (
 	forgeTokenExpirySkew       = 2 * time.Minute
 	forgeOAuthRefreshTimeout   = 30 * time.Second
@@ -302,22 +429,30 @@ var (
 // built-in ClaudeCode OAuth provider first, then the plain Anthropic API-key
 // provider. The returned bool indicates whether the credential is a bearer
 // token.
-func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer bool, err error) {
+func resolveForgeAnthropicCredentials(
+	ctx context.Context,
+	cfg ProviderConfig,
+) (key string, bearer bool, provenance credentialProvenance, err error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return "", false, err
+		return "", false, credentialProvenance{}, err
 	}
 
 	var failures []error
 
 	for _, path := range forgeCredentialPaths() {
-		key, bearer, err := readForgeCredentialsFile(ctx, path)
+		key, bearer, err := readForgeCredentialsFile(ctx, cfg, path)
 		if err == nil && key != "" {
-			return key, bearer, nil
+			return key, bearer, credentialProvenance{
+				Provider:      providerAnthropic,
+				Store:         CredentialStoreForgeCredentials,
+				Location:      path,
+				BorrowedOAuth: bearer,
+			}, nil
 		}
 
 		if err != nil {
 			if isBlockingCredentialResolutionError(err) {
-				return "", false, err
+				return "", false, credentialProvenance{}, err
 			}
 
 			failures = append(failures, err)
@@ -325,15 +460,25 @@ func resolveForgeAnthropicCredentials(ctx context.Context) (key string, bearer b
 	}
 
 	if len(failures) == 0 {
-		return "", false, errors.New("no ForgeCode credential paths")
+		return "", false, credentialProvenance{}, errors.New("no ForgeCode credential paths")
 	}
 
-	return "", false, fmt.Errorf("no ForgeCode Anthropic credentials found: %w", errors.Join(failures...))
+	return "", false, credentialProvenance{}, fmt.Errorf("no ForgeCode Anthropic credentials found: %w", errors.Join(failures...))
 }
 
-func readForgeCredentialsFile(ctx context.Context, path string) (key string, bearer bool, err error) {
+//nolint:cyclop // Credential precedence and policy/fallback handling stay explicit and auditable.
+func readForgeCredentialsFile(ctx context.Context, cfg ProviderConfig, path string) (key string, bearer bool, err error) {
 	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
 		return "", false, ctxErr
+	}
+
+	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:    providerAnthropic,
+		Store:       CredentialStoreForgeCredentials,
+		Description: "ForgeCode credentials file",
+		Location:    path,
+	}, credentialActionRead); sourceErr != nil {
+		return "", false, sourceErr
 	}
 
 	if policyErr := authorizeProviderCredentialFileRead(ctx, providerAnthropic, "read ForgeCode credentials file", path); policyErr != nil {
@@ -342,7 +487,7 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false, fmt.Errorf("cannot read ForgeCode credentials %s: %w", path, err)
+		return "", false, fmt.Errorf("cannot read ForgeCode credentials: %s", redactCredentialPathError(err))
 	}
 
 	entries, err := parseForgeCredentialEntries(data)
@@ -350,15 +495,20 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 		return "", false, err
 	}
 
+	var refreshErr error
+
+	claudeCodeOAuthSource := forgeClaudeCodeOAuthCredentialSource(path)
 	if key := forgeCredentialForProvider(entries, forgeClaudeCodeProviderID); key != "" {
-		return key, true, nil
+		if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, claudeCodeOAuthSource, credentialActionUse); sourceErr != nil {
+			refreshErr = sourceErr
+		} else {
+			return key, true, nil
+		}
 	}
 
-	refreshErr := error(nil)
-
-	if key, err := refreshForgeClaudeCodeCredential(ctx, path, data, entries); err == nil && key != "" {
+	if key, err := refreshForgeClaudeCodeCredential(ctx, cfg, path, data, entries); err == nil && key != "" {
 		return key, true, nil
-	} else if isBlockingCredentialResolutionError(err) {
+	} else if isContextError(err) || permission.ErrDenied(err) {
 		return "", false, err
 	} else if err != nil && !errors.Is(err, errForgeOAuthRefreshUnavailable) {
 		refreshErr = err
@@ -373,6 +523,16 @@ func readForgeCredentialsFile(ctx context.Context, path string) (key string, bea
 	}
 
 	return "", false, errors.New("no claude_code or anthropic credential in ForgeCode credentials")
+}
+
+func forgeClaudeCodeOAuthCredentialSource(path string) credentialSource {
+	return credentialSource{
+		Provider:      providerAnthropic,
+		Store:         CredentialStoreForgeCredentials,
+		Description:   "ForgeCode claude_code OAuth",
+		Location:      path,
+		BorrowedOAuth: true,
+	}
 }
 
 func forgeCredentialPaths() []string {
@@ -441,9 +601,9 @@ func forgeAnthropicCredentialFromEntries(entries []forgeCredentialEntry) (key st
 	return "", false, errors.New("no claude_code or anthropic credential in ForgeCode credentials")
 }
 
-func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []byte, entries []forgeCredentialEntry) (string, error) {
+func refreshForgeClaudeCodeCredential(ctx context.Context, cfg ProviderConfig, path string, data []byte, entries []forgeCredentialEntry) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return "", err
+		return "", fmt.Errorf("read current ForgeCode credentials: %w", err)
 	}
 
 	entry := forgeProviderEntry(entries, forgeClaudeCodeProviderID)
@@ -457,15 +617,54 @@ func refreshForgeClaudeCodeCredential(ctx context.Context, path string, data []b
 	}
 
 	if token := oauth.Tokens.validAccessToken(); token != "" {
+		if err := authorizeCredentialSourcePolicy(ctx, cfg, forgeClaudeCodeOAuthCredentialSource(path), credentialActionUse); err != nil {
+			return "", err
+		}
+
 		return token, nil
+	}
+
+	source := forgeClaudeCodeOAuthCredentialSource(path)
+	source.Identifier = forgeCredentialEntryIdentifier(*entry)
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return "", err
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
+		return "", err
 	}
 
 	tokens, err := refreshForgeOAuthToken(ctx, oauth.Config, oauth.Tokens.refreshToken())
 	if err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return "", err
 	}
 
-	if err := writeRefreshedForgeCredentials(ctx, path, data, tokens); err != nil {
+	auditCredentialEvent(ctx, credentialAuditEvent{
+		Event:         credentialAuditEventRefresh,
+		Provider:      source.Provider,
+		Store:         source.Store,
+		Action:        credentialActionRefresh,
+		Source:        source.Description,
+		Location:      source.Location,
+		Identifier:    source.Identifier,
+		BorrowedOAuth: source.BorrowedOAuth,
+		Decision:      "allowed",
+	})
+
+	if err := writeRefreshedForgeCredentials(ctx, cfg, path, data, tokens, source.Identifier); err != nil {
+		if mismatch := new(credentialFileCASMismatch); errors.As(err, &mismatch) {
+			if current, currentErr := currentForgeClaudeCodeToken(ctx, path); currentErr == nil && current != "" {
+				return current, nil
+			}
+		}
+
 		return "", err
 	}
 
@@ -551,8 +750,24 @@ func refreshForgeOAuthToken(ctx context.Context, config forgeOAuthConfig, refres
 	return tokens, nil
 }
 
-func writeRefreshedForgeCredentials(ctx context.Context, path string, data []byte, tokens forgeOAuthTokens) error {
+func writeRefreshedForgeCredentials(
+	ctx context.Context,
+	cfg ProviderConfig,
+	path string,
+	data []byte,
+	tokens forgeOAuthTokens,
+	identifier string,
+) error {
 	if err := requireCredentialContext(ctx); err != nil {
+		return err
+	}
+
+	source := forgeClaudeCodeOAuthCredentialSource(path)
+	source.Identifier = identifier
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -564,12 +779,78 @@ func writeRefreshedForgeCredentials(ctx context.Context, path string, data []byt
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
+	expectedDigest := digestCredentialFile(data)
+
+	err := withCredentialFileLock(path, func() error {
+		if err := requireCredentialContext(ctx); err != nil {
+			return err
+		}
+
+		current, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read ForgeCode credentials for write-back: %s", redactCredentialPathError(err))
+		}
+
+		if !compareCredentialFileDigest(current, expectedDigest) {
+			auditCredentialEvent(ctx, credentialAuditEvent{
+				Event:         credentialAuditEventCAS,
+				Provider:      source.Provider,
+				Store:         source.Store,
+				Action:        credentialActionWriteBack,
+				Source:        source.Description,
+				Location:      source.Location,
+				Identifier:    source.Identifier,
+				BorrowedOAuth: source.BorrowedOAuth,
+				Decision:      "skipped",
+				Reason:        "credential file changed before write-back",
+			})
+
+			return &credentialFileCASMismatch{path: path}
+		}
+
+		out, err := refreshedForgeCredentialsJSON(current, tokens)
+		if err != nil {
+			return err
+		}
+
+		if err := requireCredentialContext(ctx); err != nil {
+			return err
+		}
+
+		if err := atomicWriteCredentialFile(ctx, path, out, 0o600); err != nil {
+			return fmt.Errorf("write refreshed ForgeCode credentials: %w", err)
+		}
+
+		auditCredentialEvent(ctx, credentialAuditEvent{
+			Event:         credentialAuditEventWriteBack,
+			Provider:      source.Provider,
+			Store:         source.Store,
+			Action:        credentialActionWriteBack,
+			Source:        source.Description,
+			Location:      source.Location,
+			Identifier:    source.Identifier,
+			BorrowedOAuth: source.BorrowedOAuth,
+			Decision:      "allowed",
+		})
+
+		return nil
+	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
+	}
+
+	return err
+}
+
+func refreshedForgeCredentialsJSON(data []byte, tokens forgeOAuthTokens) ([]byte, error) {
 	var raw []map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("update ForgeCode credentials: %w", err)
+		return nil, fmt.Errorf("update ForgeCode credentials: %w", err)
 	}
 
 	updated := false
@@ -582,7 +863,7 @@ func writeRefreshedForgeCredentials(ctx context.Context, path string, data []byt
 
 		tokenMap := forgeTokenMap(raw[i])
 		if tokenMap == nil {
-			return errForgeOAuthRefreshUnavailable
+			return nil, errForgeOAuthRefreshUnavailable
 		}
 
 		setCredentialString(tokenMap, "access_token", "accessToken", tokens.accessToken())
@@ -595,24 +876,33 @@ func writeRefreshedForgeCredentials(ctx context.Context, path string, data []byt
 	}
 
 	if !updated {
-		return errForgeOAuthRefreshUnavailable
+		return nil, errForgeOAuthRefreshUnavailable
 	}
 
 	out, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal refreshed ForgeCode credentials: %w", err)
+		return nil, fmt.Errorf("marshal refreshed ForgeCode credentials: %w", err)
 	}
 
+	return append(out, '\n'), nil
+}
+
+func currentForgeClaudeCodeToken(ctx context.Context, path string) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return err
+		return "", err
 	}
 
-	out = append(out, '\n')
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return fmt.Errorf("write refreshed ForgeCode credentials: %w", err)
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read current ForgeCode credentials: %s", redactCredentialPathError(err))
 	}
 
-	return nil
+	entries, err := parseForgeCredentialEntries(current)
+	if err != nil {
+		return "", fmt.Errorf("parse current ForgeCode credentials: %w", err)
+	}
+
+	return forgeCredentialForProvider(entries, forgeClaudeCodeProviderID), nil
 }
 
 func forgeTokenMap(entry map[string]any) map[string]any {
@@ -700,6 +990,15 @@ func (e forgeCredentialEntry) authDetails() forgeAuthDetails {
 	}
 
 	return e.AuthDetailsCamel
+}
+
+func forgeCredentialEntryIdentifier(entry forgeCredentialEntry) string {
+	return firstNonEmptyString(
+		entry.URLParams.UserID,
+		entry.URLParams.UserIDCamel,
+		entry.URLParams.AccountID,
+		entry.URLParams.AccountCamel,
+	)
 }
 
 func (a forgeAuthDetails) credential() string {
@@ -814,13 +1113,15 @@ type codexTokens struct {
 // file. It reads the access/refresh tokens and persists refreshed tokens back
 // to disk atomically so concurrent codex CLI invocations stay in sync.
 type codexChatGPTAuth struct {
-	httpClient   *http.Client
-	refreshURL   string // overridable for tests
-	authPath     string
-	accessToken  string
-	refreshToken string
-	accountID    string
-	mu           sync.Mutex
+	httpClient       *http.Client
+	refreshURL       string // overridable for tests
+	authPath         string
+	accessToken      string
+	refreshToken     string
+	accountID        string
+	source           credentialProvenance
+	credentialPolicy CredentialSourcePolicy
+	mu               sync.Mutex
 }
 
 // codexChatGPTOAuthClientID is the OAuth client_id codex uses for the
@@ -839,6 +1140,10 @@ var codexChatGPTHTTPClient = &http.Client{Timeout: forgeOAuthRefreshTimeout}
 // $CODEX_HOME). It returns an error if auth.json is missing, malformed, or
 // not in chatgpt mode.
 func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexChatGPTAuth, error) {
+	return loadCodexChatGPTAuthWithConfigContext(ctx, codexHome, ProviderConfig{})
+}
+
+func loadCodexChatGPTAuthWithConfigContext(ctx context.Context, codexHome string, cfg ProviderConfig) (*codexChatGPTAuth, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
 	}
@@ -852,6 +1157,15 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 	}
 
 	authPath := filepath.Join(codexHome, "auth.json")
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      authPath,
+		BorrowedOAuth: true,
+	}, credentialActionRead); err != nil {
+		return nil, err
+	}
 
 	if policyErr := authorizeProviderCredentialFileRead(ctx, providerCodex, "load Codex ChatGPT credentials", authPath); policyErr != nil {
 		return nil, policyErr
@@ -859,7 +1173,7 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 
 	data, err := os.ReadFile(authPath)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", authPath, err)
+		return nil, fmt.Errorf("read Codex auth.json: %s", redactCredentialPathError(err))
 	}
 
 	if err := requireCredentialContext(ctx); err != nil {
@@ -868,7 +1182,7 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 
 	var auth codexAuth
 	if err := json.Unmarshal(data, &auth); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", authPath, err)
+		return nil, fmt.Errorf("parse %s: %w", redactCredentialLocation(authPath), err)
 	}
 
 	if !strings.EqualFold(auth.AuthMode, "chatgpt") {
@@ -876,7 +1190,7 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 	}
 
 	if auth.Tokens.AccessToken == "" {
-		return nil, fmt.Errorf("codex %s missing access_token", authPath)
+		return nil, fmt.Errorf("codex %s missing access_token", redactCredentialLocation(authPath))
 	}
 
 	return &codexChatGPTAuth{
@@ -886,6 +1200,14 @@ func loadCodexChatGPTAuthContext(ctx context.Context, codexHome string) (*codexC
 		accountID:    auth.Tokens.AccountID,
 		httpClient:   codexChatGPTHTTPClient,
 		refreshURL:   codexChatGPTRefreshURL,
+		source: credentialProvenance{
+			Provider:      providerCodex,
+			Store:         CredentialStoreCodexAuthJSON,
+			Location:      authPath,
+			Identifier:    auth.Tokens.AccountID,
+			BorrowedOAuth: true,
+		},
+		credentialPolicy: credentialPolicyForProvider(ctx, cfg),
 	}, nil
 }
 
@@ -909,7 +1231,7 @@ func (a *codexChatGPTAuth) hasRefreshToken() bool {
 // new state back to auth.json. The caller may pass a previously observed
 // access token to skip the refresh if another goroutine has already refreshed.
 //
-//nolint:cyclop // Refresh is a security-sensitive linear validate/request/persist flow; splitting would obscure the audit sequence.
+//nolint:cyclop,gocognit,nestif,wsl_v5 // Security-sensitive linear validate/request/persist flow; splitting would obscure the audit sequence.
 func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) error {
 	if err := requireCredentialContext(ctx); err != nil {
 		return err
@@ -927,6 +1249,20 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		return errors.New("codex chatgpt refresh: no refresh_token available")
 	}
 
+	source := a.credentialSource()
+	cfg := ProviderConfig{CredentialPolicy: a.credentialPolicy}
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
+		return err
+	}
+
 	if policyErr := authorizeProviderPermission(
 		ctx,
 		providerCodex,
@@ -936,6 +1272,8 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialRefreshFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
@@ -958,17 +1296,26 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("codex chatgpt refresh: %w", err)
+		err = fmt.Errorf("codex chatgpt refresh: %w", err)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes))
 	if err != nil {
-		return fmt.Errorf("codex chatgpt refresh: read response: %w", err)
+		err = fmt.Errorf("codex chatgpt refresh: read response: %w", err)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("codex chatgpt refresh: %w", newProviderHTTPError(providerCodex, resp, respBody))
+		err = fmt.Errorf("codex chatgpt refresh: %w", newProviderHTTPError(providerCodex, resp, respBody))
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	var refreshed struct {
@@ -976,35 +1323,128 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := json.Unmarshal(respBody, &refreshed); err != nil {
-		return fmt.Errorf("codex chatgpt refresh: decode response: %w", err)
+	if decodeErr := json.Unmarshal(respBody, &refreshed); decodeErr != nil {
+		err = fmt.Errorf("codex chatgpt refresh: decode response: %w", decodeErr)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	if refreshed.AccessToken == "" {
-		return errors.New("codex chatgpt refresh: response missing access_token")
-	}
+		err = errors.New("codex chatgpt refresh: response missing access_token")
+		auditCredentialRefreshFailure(ctx, source, err)
 
-	if err := requireCredentialContext(ctx); err != nil {
 		return err
 	}
 
-	if err := persistRefreshedCodexAuth(ctx, a.authPath, refreshed.AccessToken, refreshed.RefreshToken, refreshed.IDToken); err != nil {
+	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+		return ctxErr
+	}
+
+	auditCredentialEvent(ctx, credentialAuditEvent{
+		Event:         credentialAuditEventRefresh,
+		Provider:      source.Provider,
+		Store:         source.Store,
+		Action:        credentialActionRefresh,
+		Source:        source.Description,
+		Location:      source.Location,
+		Identifier:    source.Identifier,
+		BorrowedOAuth: source.BorrowedOAuth,
+		Decision:      "allowed",
+	})
+
+	state, err := persistRefreshedCodexAuthWithCAS(
+		ctx,
+		a.authPath,
+		a.accessToken,
+		a.refreshToken,
+		refreshed.AccessToken,
+		refreshed.RefreshToken,
+		refreshed.IDToken,
+		source,
+		cfg,
+	)
+	if err != nil {
+		if isCredentialFileCASMismatch(err) && state.accessToken != "" {
+			a.accessToken = state.accessToken
+			if state.refreshToken != "" {
+				a.refreshToken = state.refreshToken
+			}
+			if state.accountID != "" {
+				a.accountID = state.accountID
+			}
+
+			return nil
+		}
+
 		return err
 	}
 
-	a.accessToken = refreshed.AccessToken
-	if refreshed.RefreshToken != "" {
-		a.refreshToken = refreshed.RefreshToken
+	a.accessToken = state.accessToken
+	if state.refreshToken != "" {
+		a.refreshToken = state.refreshToken
+	}
+	if state.accountID != "" {
+		a.accountID = state.accountID
 	}
 
 	return nil
 }
 
+//nolint:wsl_v5 // Compact defaulting keeps provenance construction readable.
+func (a *codexChatGPTAuth) credentialSource() credentialSource {
+	source := a.source
+	if source.Provider == "" {
+		source.Provider = providerCodex
+	}
+	if source.Store == "" {
+		source.Store = CredentialStoreCodexAuthJSON
+	}
+	if source.Location == "" {
+		source.Location = a.authPath
+	}
+	source.BorrowedOAuth = true
+
+	return credentialSourceFromProvenance(source, "Codex ChatGPT auth.json")
+}
+
+type codexAuthState struct {
+	accessToken  string
+	refreshToken string
+	accountID    string
+}
+
 // persistRefreshedCodexAuth merges the refreshed tokens into auth.json while
 // preserving any unrelated fields. The write is atomic via tempfile + rename.
 func persistRefreshedCodexAuth(ctx context.Context, path, accessToken, refreshToken, idToken string) error {
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      path,
+		BorrowedOAuth: true,
+	}
+	cfg := ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()}
+	_, err := persistRefreshedCodexAuthWithCAS(ctx, path, "", "", accessToken, refreshToken, idToken, source, cfg)
+
+	return err
+}
+
+//nolint:wsl_v5 // CAS/write-back sequence is clearer as one guarded critical section.
+func persistRefreshedCodexAuthWithCAS(
+	ctx context.Context,
+	path, expectedAccessToken, expectedRefreshToken, accessToken, refreshToken, idToken string,
+	source credentialSource,
+	cfg ProviderConfig,
+) (codexAuthState, error) {
 	if err := requireCredentialContext(ctx); err != nil {
-		return err
+		return codexAuthState{}, err
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
+		return codexAuthState{}, err
 	}
 
 	if policyErr := authorizeProviderPermission(
@@ -1015,27 +1455,81 @@ func persistRefreshedCodexAuth(ctx context.Context, path, accessToken, refreshTo
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
-		return policyErr
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
+		return codexAuthState{}, policyErr
 	}
 
-	raw, err := readCodexAuthMap(ctx, path)
-	if err != nil {
-		return err
+	var state codexAuthState
+
+	err := withCredentialFileLock(path, func() error {
+		raw, err := readCodexAuthMap(ctx, path)
+		if err != nil {
+			return err
+		}
+
+		current := codexAuthStateFromMap(raw)
+		if !codexExpectedTokensMatch(current, expectedAccessToken, expectedRefreshToken) {
+			state = current
+			auditCredentialEvent(ctx, credentialAuditEvent{
+				Event:         credentialAuditEventCAS,
+				Provider:      source.Provider,
+				Store:         source.Store,
+				Action:        credentialActionWriteBack,
+				Source:        source.Description,
+				Location:      source.Location,
+				Identifier:    source.Identifier,
+				BorrowedOAuth: source.BorrowedOAuth,
+				Decision:      "skipped",
+				Reason:        "credential file changed before write-back",
+			})
+
+			return &credentialFileCASMismatch{path: path}
+		}
+
+		mergeCodexTokens(raw, accessToken, refreshToken, idToken)
+		raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
+
+		state = codexAuthStateFromMap(raw)
+		if state.accessToken == "" {
+			state.accessToken = accessToken
+		}
+		if state.refreshToken == "" {
+			state.refreshToken = refreshToken
+		}
+
+		out, err := json.MarshalIndent(raw, "", "  ")
+		if err != nil {
+			return fmt.Errorf("codex auth.json marshal: %w", err)
+		}
+
+		if err := requireCredentialContext(ctx); err != nil {
+			return err
+		}
+
+		if err := atomicWriteCredentialFile(ctx, path, append(out, '\n'), 0o600); err != nil {
+			return err
+		}
+
+		auditCredentialEvent(ctx, credentialAuditEvent{
+			Event:         credentialAuditEventWriteBack,
+			Provider:      source.Provider,
+			Store:         source.Store,
+			Action:        credentialActionWriteBack,
+			Source:        source.Description,
+			Location:      source.Location,
+			Identifier:    source.Identifier,
+			BorrowedOAuth: source.BorrowedOAuth,
+			Decision:      "allowed",
+		})
+
+		return nil
+	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
 	}
 
-	mergeCodexTokens(raw, accessToken, refreshToken, idToken)
-	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339Nano)
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("codex auth.json marshal: %w", err)
-	}
-
-	if err := requireCredentialContext(ctx); err != nil {
-		return err
-	}
-
-	return atomicWriteFile(path, append(out, '\n'), 0o600)
+	return state, err
 }
 
 func readCodexAuthMap(ctx context.Context, path string) (map[string]any, error) {
@@ -1049,7 +1543,7 @@ func readCodexAuthMap(ctx context.Context, path string) (map[string]any, error) 
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("codex auth.json read: %w", err)
+		return nil, fmt.Errorf("codex auth.json read: %s", redactCredentialPathError(err))
 	}
 
 	if err := requireCredentialContext(ctx); err != nil {
@@ -1088,47 +1582,38 @@ func mergeCodexTokens(raw map[string]any, accessToken, refreshToken, idToken str
 	}
 }
 
-func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".auth.json.tmp-*")
-	if err != nil {
-		return fmt.Errorf("codex auth.json tempfile: %w", err)
+func codexAuthStateFromMap(raw map[string]any) codexAuthState {
+	tokens, ok := raw["tokens"].(map[string]any)
+	if !ok {
+		return codexAuthState{}
 	}
 
-	tmpPath := tmp.Name()
-	cleanup := true
+	return codexAuthState{
+		accessToken:  stringFromMap(tokens, "access_token"),
+		refreshToken: stringFromMap(tokens, "refresh_token"),
+		accountID:    stringFromMap(tokens, "account_id"),
+	}
+}
 
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("codex auth.json chmod tempfile: %w", err)
+func codexExpectedTokensMatch(current codexAuthState, expectedAccessToken, expectedRefreshToken string) bool {
+	if expectedAccessToken != "" && current.accessToken != expectedAccessToken {
+		return false
 	}
 
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("codex auth.json write tempfile: %w", err)
+	if expectedRefreshToken != "" && current.refreshToken != expectedRefreshToken {
+		return false
 	}
 
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("codex auth.json sync tempfile: %w", err)
+	return true
+}
+
+func stringFromMap(raw map[string]any, key string) string {
+	value, ok := raw[key].(string)
+	if !ok {
+		return ""
 	}
 
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("codex auth.json close tempfile: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("codex auth.json rename: %w", err)
-	}
-
-	cleanup = false
-
-	return nil
+	return value
 }
 
 // ResolveOpenAIKey is kept for source compatibility only.
@@ -1146,8 +1631,23 @@ func ResolveOpenAIKey() (key string, bearer bool, err error) {
 // The second return value indicates whether the credential is a bearer token
 // (true) or a plain API key (false).
 func ResolveOpenAIKeyContext(ctx context.Context) (key string, bearer bool, err error) {
+	return ResolveOpenAIKeyWithConfigContext(ctx, ProviderConfig{})
+}
+
+// ResolveOpenAIKeyWithConfigContext resolves OpenAI Platform credentials while
+// honoring credential-source policy from cfg.
+func ResolveOpenAIKeyWithConfigContext(ctx context.Context, cfg ProviderConfig) (key string, bearer bool, err error) {
+	key, _, err = resolveOpenAIKeyWithProvenanceContext(ctx, cfg)
+
+	return key, false, err
+}
+
+func resolveOpenAIKeyWithProvenanceContext(
+	ctx context.Context,
+	cfg ProviderConfig,
+) (key string, provenance credentialProvenance, err error) {
 	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
-		return "", false, ctxErr
+		return "", credentialProvenance{}, ctxErr
 	}
 
 	if policyErr := authorizeProviderPermission(
@@ -1157,43 +1657,73 @@ func ResolveOpenAIKeyContext(ctx context.Context) (key string, bearer bool, err 
 		"OPENAI_API_KEY or ~/.codex/auth.json",
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
-		return "", false, policyErr
+		return "", credentialProvenance{}, policyErr
 	}
 
 	if v := os.Getenv("OPENAI_API_KEY"); v != "" {
-		return v, false, nil
+		source := credentialSource{
+			Provider:    providerOpenAI,
+			Store:       CredentialStoreEnv,
+			Description: "OPENAI_API_KEY",
+			Location:    "env:OPENAI_API_KEY",
+		}
+
+		if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionUse); sourceErr != nil {
+			return "", credentialProvenance{}, sourceErr
+		}
+
+		return v, credentialProvenance{
+			Provider: providerOpenAI,
+			Store:    CredentialStoreEnv,
+			Location: "env:OPENAI_API_KEY",
+		}, nil
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", false, errors.New("no OpenAI credentials found: set OPENAI_API_KEY")
+		return "", credentialProvenance{}, errors.New("no OpenAI credentials found: set OPENAI_API_KEY")
 	}
 
 	authPath := filepath.Join(home, ".codex", "auth.json")
+
+	source := credentialSource{
+		Provider:    providerOpenAI,
+		Store:       CredentialStoreCodexAuthJSON,
+		Description: "Codex auth.json OpenAI API key",
+		Location:    authPath,
+	}
+	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRead); sourceErr != nil {
+		return "", credentialProvenance{}, sourceErr
+	}
+
 	if policyErr := authorizeProviderCredentialFileRead(ctx, providerOpenAI, "read OpenAI auth.json", authPath); policyErr != nil {
-		return "", false, policyErr
+		return "", credentialProvenance{}, policyErr
 	}
 
 	data, err := os.ReadFile(authPath)
 	if err != nil {
-		return "", false, errors.New("no OpenAI credentials found: set OPENAI_API_KEY or log in with `codex` CLI")
+		return "", credentialProvenance{}, errors.New("no OpenAI credentials found: set OPENAI_API_KEY or log in with `codex` CLI")
 	}
 
 	if err := requireCredentialContext(ctx); err != nil {
-		return "", false, err
+		return "", credentialProvenance{}, err
 	}
 
 	var auth codexAuth
 	if err := json.Unmarshal(data, &auth); err != nil {
-		return "", false, errors.New("failed to parse ~/.codex/auth.json")
+		return "", credentialProvenance{}, errors.New("failed to parse ~/.codex/auth.json")
 	}
 
 	// Prefer an explicit API key stored in auth.json.
 	if auth.APIKey != nil && *auth.APIKey != "" {
-		return *auth.APIKey, false, nil
+		return *auth.APIKey, credentialProvenance{
+			Provider: providerOpenAI,
+			Store:    CredentialStoreCodexAuthJSON,
+			Location: authPath,
+		}, nil
 	}
 
-	return "", false, errors.New("no OpenAI Platform API key found in OPENAI_API_KEY or ~/.codex/auth.json")
+	return "", credentialProvenance{}, errors.New("no OpenAI Platform API key found in OPENAI_API_KEY or ~/.codex/auth.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,17 +1751,41 @@ type claudeCodeCredentialPersister interface {
 	location() string
 }
 
+type claudeCodeCredentialIdentifierPersister interface {
+	identifier() string
+}
+
+type claudeCodeCredentialCASPersister interface {
+	persistCAS(
+		ctx context.Context,
+		expectedAccessToken, expectedRefreshToken, accessToken, refreshToken string,
+		expiresAtMs int64,
+		source credentialSource,
+		cfg ProviderConfig,
+	) (claudeCodePersistState, error)
+}
+
+type claudeCodePersistState struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    int64
+}
+
 // claudeCodeAuth is a thread-safe handle to Claude Code's OAuth credentials.
 // It refreshes access tokens against the Claude Code OAuth endpoint and writes
 // the refreshed state back atomically, mirroring the codex chatgpt-mode flow.
+//
+//nolint:govet // Field order keeps auth state grouped for auditability.
 type claudeCodeAuth struct {
-	httpClient   *http.Client
-	refreshURL   string
-	persist      claudeCodeCredentialPersister
-	accessToken  string
-	refreshToken string
-	expiresAt    int64 // epoch ms; 0 means "unknown"
-	mu           sync.Mutex
+	httpClient       *http.Client
+	refreshURL       string
+	persist          claudeCodeCredentialPersister
+	accessToken      string
+	refreshToken     string
+	expiresAt        int64 // epoch ms; 0 means "unknown"
+	source           credentialProvenance
+	credentialPolicy CredentialSourcePolicy
+	mu               sync.Mutex
 }
 
 // loadClaudeCodeAuth discovers Claude Code OAuth credentials, in order:
@@ -1241,6 +1795,10 @@ type claudeCodeAuth struct {
 // The returned handle can refresh and persist credentials back to the same
 // source so the claude CLI continues to see fresh tokens.
 func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
+	return loadClaudeCodeAuthWithConfig(ctx, ProviderConfig{})
+}
+
+func loadClaudeCodeAuthWithConfig(ctx context.Context, cfg ProviderConfig) (*claudeCodeAuth, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return nil, err
 	}
@@ -1256,9 +1814,26 @@ func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
 	}
 
 	// Allow tests to opt out of the keychain probe even on darwin.
-	if os.Getenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN") != "1" {
-		if block, persister, err := readClaudeCodeKeychainAuth(ctx); err == nil {
-			return newClaudeCodeAuthFromBlock(block, persister), nil
+	if runtime.GOOS == "darwin" && os.Getenv("ATTELER_CLAUDE_CODE_SKIP_KEYCHAIN") != "1" {
+		keychainErr := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+			Provider:      providerClaudeCode,
+			Store:         CredentialStoreClaudeCodeKeychain,
+			Description:   "Claude Code keychain OAuth",
+			Location:      claudeCodeKeychainSource,
+			BorrowedOAuth: true,
+		}, credentialActionRead)
+		if keychainErr == nil {
+			if block, persister, err := readClaudeCodeKeychainAuth(ctx); err == nil {
+				return newClaudeCodeAuthFromBlockWithSource(block, persister, credentialProvenance{
+					Provider:      providerClaudeCode,
+					Store:         CredentialStoreClaudeCodeKeychain,
+					Location:      claudeCodeKeychainSource,
+					Identifier:    claudeCodePersisterIdentifier(persister),
+					BorrowedOAuth: true,
+				}, credentialPolicyForProvider(ctx, cfg)), nil
+			}
+		} else if isBlockingCredentialResolutionError(keychainErr) {
+			return nil, keychainErr
 		}
 	}
 
@@ -1268,6 +1843,15 @@ func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
 	}
 
 	path := filepath.Join(home, ".claude", ".credentials.json")
+	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:      providerClaudeCode,
+		Store:         CredentialStoreClaudeCodeFile,
+		Description:   "Claude Code credentials file",
+		Location:      path,
+		BorrowedOAuth: true,
+	}, credentialActionRead); sourceErr != nil {
+		return nil, sourceErr
+	}
 
 	if policyErr := authorizeProviderCredentialFileRead(ctx, providerClaudeCode, "read Claude Code credentials file", path); policyErr != nil {
 		return nil, policyErr
@@ -1275,7 +1859,7 @@ func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("no Claude Code credentials: %w (run `claude` to log in)", err)
+		return nil, fmt.Errorf("no Claude Code credentials: %s (run `claude` to log in)", redactCredentialPathError(err))
 	}
 
 	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
@@ -1284,21 +1868,63 @@ func loadClaudeCodeAuth(ctx context.Context) (*claudeCodeAuth, error) {
 
 	block, err := parseClaudeCodeCredentialsRaw(data)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", redactCredentialLocation(path), err)
 	}
 
-	return newClaudeCodeAuthFromBlock(block, &claudeCodeFilePersister{path: path}), nil
+	return newClaudeCodeAuthFromBlockWithSource(block, &claudeCodeFilePersister{path: path}, credentialProvenance{
+		Provider:      providerClaudeCode,
+		Store:         CredentialStoreClaudeCodeFile,
+		Location:      path,
+		BorrowedOAuth: true,
+	}, credentialPolicyForProvider(ctx, cfg)), nil
 }
 
 func newClaudeCodeAuthFromBlock(block claudeOAuthBlock, persister claudeCodeCredentialPersister) *claudeCodeAuth {
+	return newClaudeCodeAuthFromBlockWithSource(block, persister, credentialProvenance{
+		Provider:      providerClaudeCode,
+		Store:         claudeCodePersisterStore(persister),
+		Location:      persister.location(),
+		Identifier:    claudeCodePersisterIdentifier(persister),
+		BorrowedOAuth: true,
+	}, permissiveCredentialSourcePolicy())
+}
+
+func newClaudeCodeAuthFromBlockWithSource(
+	block claudeOAuthBlock,
+	persister claudeCodeCredentialPersister,
+	source credentialProvenance,
+	policy CredentialSourcePolicy,
+) *claudeCodeAuth {
 	return &claudeCodeAuth{
-		httpClient:   claudeCodeHTTPClient,
-		refreshURL:   claudeCodeRefreshURL,
-		persist:      persister,
-		accessToken:  block.AccessToken,
-		refreshToken: block.RefreshToken,
-		expiresAt:    block.ExpiresAt,
+		httpClient:       claudeCodeHTTPClient,
+		refreshURL:       claudeCodeRefreshURL,
+		persist:          persister,
+		accessToken:      block.AccessToken,
+		refreshToken:     block.RefreshToken,
+		expiresAt:        block.ExpiresAt,
+		source:           source,
+		credentialPolicy: policy,
 	}
+}
+
+func claudeCodePersisterStore(persister claudeCodeCredentialPersister) string {
+	if persister == nil {
+		return ""
+	}
+
+	if strings.HasPrefix(persister.location(), "keychain:") {
+		return CredentialStoreClaudeCodeKeychain
+	}
+
+	return CredentialStoreClaudeCodeFile
+}
+
+func claudeCodePersisterIdentifier(persister claudeCodeCredentialPersister) string {
+	if identifierPersister, ok := persister.(claudeCodeCredentialIdentifierPersister); ok {
+		return identifierPersister.identifier()
+	}
+
+	return ""
 }
 
 // snapshot returns the current access token for an outgoing request.
@@ -1320,6 +1946,8 @@ func (a *claudeCodeAuth) hasRefreshToken() bool {
 // new state back to the credential source. The caller may pass the access
 // token it observed; if another goroutine has already refreshed since then,
 // this call is a no-op.
+//
+//nolint:cyclop,gocognit,nestif,wsl_v5 // Security-sensitive linear validate/request/persist flow; splitting would obscure the audit sequence.
 func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) error {
 	if err := requireCredentialContext(ctx); err != nil {
 		return err
@@ -1336,6 +1964,20 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		return errors.New("claude code refresh: no refresh_token available")
 	}
 
+	source := a.credentialSource()
+	cfg := ProviderConfig{CredentialPolicy: a.credentialPolicy}
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
+		return err
+	}
+
 	if policyErr := authorizeProviderPermission(
 		ctx,
 		providerClaudeCode,
@@ -1345,11 +1987,15 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialRefreshFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
 	refreshed, err := a.exchangeClaudeCodeRefreshToken(ctx)
 	if err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -1357,9 +2003,71 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		return err
 	}
 
+	auditCredentialEvent(ctx, credentialAuditEvent{
+		Event:         credentialAuditEventRefresh,
+		Provider:      source.Provider,
+		Store:         source.Store,
+		Action:        credentialActionRefresh,
+		Source:        source.Description,
+		Location:      source.Location,
+		Identifier:    source.Identifier,
+		BorrowedOAuth: source.BorrowedOAuth,
+		Decision:      "allowed",
+	})
+
 	accessToken, refreshToken, expiresAt := a.refreshedClaudeCodeState(refreshed)
-	if err := a.persist.persist(ctx, accessToken, refreshToken, expiresAt); err != nil {
-		return err
+	if casPersister, ok := a.persist.(claudeCodeCredentialCASPersister); ok {
+		state, err := casPersister.persistCAS(
+			ctx,
+			a.accessToken,
+			a.refreshToken,
+			accessToken,
+			refreshToken,
+			expiresAt,
+			source,
+			cfg,
+		)
+		if err != nil {
+			if isCredentialFileCASMismatch(err) && state.AccessToken != "" {
+				a.accessToken = state.AccessToken
+				if state.RefreshToken != "" {
+					a.refreshToken = state.RefreshToken
+				}
+				if state.ExpiresAt > 0 {
+					a.expiresAt = state.ExpiresAt
+				}
+
+				return nil
+			}
+
+			return err
+		}
+
+		accessToken, refreshToken, expiresAt = state.AccessToken, state.RefreshToken, state.ExpiresAt
+	} else {
+		if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+			auditCredentialWriteBackFailure(ctx, source, err)
+
+			return err
+		}
+
+		if err := a.persist.persist(ctx, accessToken, refreshToken, expiresAt); err != nil {
+			auditCredentialWriteBackFailure(ctx, source, err)
+
+			return err
+		}
+
+		auditCredentialEvent(ctx, credentialAuditEvent{
+			Event:         credentialAuditEventWriteBack,
+			Provider:      source.Provider,
+			Store:         source.Store,
+			Action:        credentialActionWriteBack,
+			Source:        source.Description,
+			Location:      source.Location,
+			Identifier:    source.Identifier,
+			BorrowedOAuth: source.BorrowedOAuth,
+			Decision:      "allowed",
+		})
 	}
 
 	a.accessToken = accessToken
@@ -1367,6 +2075,27 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 	a.expiresAt = expiresAt
 
 	return nil
+}
+
+//nolint:wsl_v5 // Compact defaulting keeps provenance construction readable.
+func (a *claudeCodeAuth) credentialSource() credentialSource {
+	source := a.source
+	if source.Provider == "" {
+		source.Provider = providerClaudeCode
+	}
+	if source.Store == "" {
+		if a.persist != nil {
+			source.Store = claudeCodePersisterStore(a.persist)
+		} else {
+			source.Store = CredentialStoreClaudeCodeFile
+		}
+	}
+	if source.Location == "" && a.persist != nil {
+		source.Location = a.persist.location()
+	}
+	source.BorrowedOAuth = true
+
+	return credentialSourceFromProvenance(source, "Claude Code OAuth credentials")
 }
 
 type claudeCodeRefreshResponse struct {
@@ -1449,8 +2178,36 @@ type claudeCodeFilePersister struct {
 func (p *claudeCodeFilePersister) location() string { return p.path }
 
 func (p *claudeCodeFilePersister) persist(ctx context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
+	source := credentialSource{
+		Provider:      providerClaudeCode,
+		Store:         CredentialStoreClaudeCodeFile,
+		Description:   "Claude Code credentials file",
+		Location:      p.path,
+		BorrowedOAuth: true,
+	}
+	_, err := p.persistCAS(ctx, "", "", accessToken, refreshToken, expiresAtMs, source, ProviderConfig{
+		CredentialPolicy: permissiveCredentialSourcePolicy(),
+	})
+
+	return err
+}
+
+//nolint:gocognit,wsl_v5 // CAS/write-back sequence is clearer as one guarded critical section.
+func (p *claudeCodeFilePersister) persistCAS(
+	ctx context.Context,
+	expectedAccessToken, expectedRefreshToken, accessToken, refreshToken string,
+	expiresAtMs int64,
+	source credentialSource,
+	cfg ProviderConfig,
+) (claudeCodePersistState, error) {
 	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
-		return ctxErr
+		return claudeCodePersistState{}, ctxErr
+	}
+
+	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); sourceErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, sourceErr)
+
+		return claudeCodePersistState{}, sourceErr
 	}
 
 	if policyErr := authorizeProviderPermission(
@@ -1461,30 +2218,82 @@ func (p *claudeCodeFilePersister) persist(ctx context.Context, accessToken, refr
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
-		return policyErr
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
+		return claudeCodePersistState{}, policyErr
 	}
 
-	raw, err := readJSONObject(ctx, providerClaudeCode, p.path)
-	if err != nil {
-		return err
+	var state claudeCodePersistState
+
+	err := withCredentialFileLock(p.path, func() error {
+		raw, err := readJSONObject(ctx, providerClaudeCode, p.path)
+		if err != nil {
+			return err
+		}
+
+		current := claudeCodePersistStateFromMap(raw)
+		if !claudeCodeExpectedTokensMatch(current, expectedAccessToken, expectedRefreshToken) {
+			state = current
+			auditCredentialEvent(ctx, credentialAuditEvent{
+				Event:         credentialAuditEventCAS,
+				Provider:      source.Provider,
+				Store:         source.Store,
+				Action:        credentialActionWriteBack,
+				Source:        source.Description,
+				Location:      source.Location,
+				Identifier:    source.Identifier,
+				BorrowedOAuth: source.BorrowedOAuth,
+				Decision:      "skipped",
+				Reason:        "credential file changed before write-back",
+			})
+
+			return &credentialFileCASMismatch{path: p.path}
+		}
+
+		mergeClaudeCodeOAuth(raw, accessToken, refreshToken, expiresAtMs)
+		state = claudeCodePersistStateFromMap(raw)
+		if state.AccessToken == "" {
+			state.AccessToken = accessToken
+		}
+		if state.RefreshToken == "" {
+			state.RefreshToken = refreshToken
+		}
+		if state.ExpiresAt == 0 {
+			state.ExpiresAt = expiresAtMs
+		}
+
+		out, err := json.MarshalIndent(raw, "", "  ")
+		if err != nil {
+			return fmt.Errorf("claude code credentials marshal: %w", err)
+		}
+
+		if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
+			return ctxErr
+		}
+
+		if err := atomicWriteCredentialFile(ctx, p.path, append(out, '\n'), 0o600); err != nil {
+			return err
+		}
+
+		auditCredentialEvent(ctx, credentialAuditEvent{
+			Event:         credentialAuditEventWriteBack,
+			Provider:      source.Provider,
+			Store:         source.Store,
+			Action:        credentialActionWriteBack,
+			Source:        source.Description,
+			Location:      source.Location,
+			Identifier:    source.Identifier,
+			BorrowedOAuth: source.BorrowedOAuth,
+			Decision:      "allowed",
+		})
+
+		return nil
+	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
 	}
 
-	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
-		return ctxErr
-	}
-
-	mergeClaudeCodeOAuth(raw, accessToken, refreshToken, expiresAtMs)
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("claude code credentials marshal: %w", err)
-	}
-
-	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
-		return ctxErr
-	}
-
-	return atomicWriteFile(p.path, append(out, '\n'), 0o600)
+	return state, err
 }
 
 // readJSONObject reads a JSON object from path, returning an empty map when the
@@ -1500,7 +2309,7 @@ func readJSONObject(ctx context.Context, providerName, path string) (map[string]
 	case errors.Is(err, os.ErrNotExist):
 		return map[string]any{}, nil
 	case err != nil:
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %s", redactCredentialLocation(path), redactCredentialPathError(err))
 	}
 
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -1509,7 +2318,7 @@ func readJSONObject(ctx context.Context, providerName, path string) (map[string]
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", redactCredentialLocation(path), err)
 	}
 
 	if raw == nil {
@@ -1538,5 +2347,43 @@ func mergeClaudeCodeOAuth(raw map[string]any, accessToken, refreshToken string, 
 
 	if expiresAtMs > 0 {
 		block["expiresAt"] = expiresAtMs
+	}
+}
+
+func claudeCodePersistStateFromMap(raw map[string]any) claudeCodePersistState {
+	block, ok := raw["claudeAiOauth"].(map[string]any)
+	if !ok {
+		return claudeCodePersistState{}
+	}
+
+	return claudeCodePersistState{
+		AccessToken:  stringFromMap(block, "accessToken"),
+		RefreshToken: stringFromMap(block, "refreshToken"),
+		ExpiresAt:    int64FromMap(block, "expiresAt"),
+	}
+}
+
+func claudeCodeExpectedTokensMatch(current claudeCodePersistState, expectedAccessToken, expectedRefreshToken string) bool {
+	if expectedAccessToken != "" && current.AccessToken != expectedAccessToken {
+		return false
+	}
+
+	if expectedRefreshToken != "" && current.RefreshToken != expectedRefreshToken {
+		return false
+	}
+
+	return true
+}
+
+func int64FromMap(raw map[string]any, key string) int64 {
+	switch value := raw[key].(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case float64:
+		return int64(value)
+	default:
+		return 0
 	}
 }

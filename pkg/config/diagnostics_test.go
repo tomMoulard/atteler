@@ -463,6 +463,47 @@ context:
 	assertNoDiagnostic(t, reports[0].Diagnostics, "context.reference_policy.allow_private_networks")
 }
 
+func TestInspectPathSources_AcceptsProviderCredentialPolicy(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+providers:
+  codex:
+    credential_policy:
+      allowed_providers: [codex]
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy.allowed_providers")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy.allowed_stores")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy.allow_borrowed_oauth")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy.allow_refresh")
+	assertNoDiagnostic(t, reports[0].Diagnostics, "providers.codex.credential_policy.allow_write_back")
+}
+
+func TestInspectPathSources_ReportsUnknownProviderCredentialPolicyField(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+providers:
+  codex:
+    credential_policy:
+      allow_refesh: true
+`), 0o600))
+
+	reports := InspectPathSources([]PathSource{{Path: path, Kind: OriginExplicitFile}})
+	require.Len(t, reports, 1)
+	assertDiagnostic(t, reports[0].Diagnostics, DiagnosticError, "providers.codex.credential_policy.allow_refesh", "")
+}
+
 func TestInspectPathSources_ReportsNegativeVersion(t *testing.T) {
 	t.Parallel()
 
@@ -512,6 +553,10 @@ hooks:
 	assertDefaultDiagnostic(t, report.Defaults, "agent_loop.max_output_tokens")
 	assertDefaultDiagnostic(t, report.Defaults, "context.reference_policy.allow_absolute_paths")
 	assertDefaultDiagnostic(t, report.Defaults, "providers.*.disable_private_adapter")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.credential_policy.allowed_stores")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.credential_policy.allow_borrowed_oauth")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.credential_policy.allow_refresh")
+	assertDefaultDiagnostic(t, report.Defaults, "providers.*.credential_policy.allow_write_back")
 	assertDefaultDiagnostic(t, report.Defaults, "skill_learning.enabled")
 	assertDefaultDiagnostic(t, report.Defaults, "vector.workspace_enabled")
 	assertDefaultDiagnostic(t, report.Defaults, "vector.workspace_allow_remote_embeddings")

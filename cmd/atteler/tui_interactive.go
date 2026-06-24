@@ -285,7 +285,7 @@ func startupDefaultSelectionWarnings(report llm.DefaultSelectionReport) []string
 }
 
 func truncateStartupReadinessError(msg string) string {
-	msg = strings.TrimSpace(msg)
+	msg = strings.TrimSpace(llm.RedactDiagnosticMessage(msg))
 
 	const maxLen = 120
 	if len(msg) <= maxLen {

@@ -29,8 +29,8 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 	return map[string]ProviderRuntimeInfo{
 		providerAnthropic: { // #nosec G101 -- documentation names credential sources, not secret values.
 			ExecutionPath:    "Direct HTTPS calls from atteler to the Anthropic Messages API.",
-			CredentialSource: "`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), then Claude Code keychain or `~/.claude/.credentials.json`.",
-			TokenRefresh:     "ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.",
+			CredentialSource: "`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` env vars by default; `CLAUDE_CODE_OAUTH_TOKEN` env var, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), and Claude Code keychain/`~/.claude/.credentials.json` only when credential policy allows borrowing those OAuth sessions.",
+			TokenRefresh:     "ForgeCode OAuth credentials refresh during credential resolution only when `credential_policy.allow_refresh` and `allow_write_back` allow it; write-back is lock/CAS-guarded and refresh/write-back attempts and failures are audited. The Anthropic adapter itself does not refresh on 401.",
 			NetworkEndpoint:  fmt.Sprintf("`ANTHROPIC_BASE_URL` or provider config, default `%s`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.", defaultAnthropicBase),
 			SandboxAndTools:  "No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep tool definitions in the Messages request; tool execution happens in Atteler's agent loop.",
 			ModelInventory:   "Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.",
@@ -38,8 +38,8 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 		},
 		providerClaudeCode: { // #nosec G101 -- documentation names credential sources, not secret values.
 			ExecutionPath:    "Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run the Claude Code CLI in print mode.",
-			CredentialSource: "Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.",
-			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and persists refreshed tokens back to the same Claude Code credential store.", claudeCodeRefreshURL),
+			CredentialSource: "Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` only when `credential_policy.allowed_stores` and `allow_borrowed_oauth` allow borrowing that session.",
+			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and persists refreshed tokens back to the same Claude Code credential store only when `credential_policy.allow_refresh` and `allow_write_back` allow it; file write-back is atomic/CAS-guarded and refresh/write-back attempts and failures are audited.", claudeCodeRefreshURL),
 			NetworkEndpoint:  fmt.Sprintf("`ANTHROPIC_BASE_URL`, default `%s`; `POST /v1/messages` for completions. Model listing is static for this provider.", defaultAnthropicBase),
 			SandboxAndTools:  "No Claude Code subprocess or Claude Code workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep tool definitions; tool execution happens in Atteler's agent loop.",
 			ModelInventory:   "Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.",
@@ -47,8 +47,8 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 		},
 		providerCodex: { // #nosec G101 -- documentation names credential sources, not secret values.
 			ExecutionPath:    "Direct HTTPS Responses request from atteler to the ChatGPT Codex backend; it does not run `codex exec`.",
-			CredentialSource: "`$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens.",
-			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and atomically updates `auth.json`.", codexChatGPTRefreshURL),
+			CredentialSource: "`$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens only when `credential_policy.allowed_stores` includes `codex_auth_json` and `allow_borrowed_oauth` is true.",
+			TokenRefresh:     fmt.Sprintf("On 401, exchanges the stored refresh token at `%s` and atomically updates `auth.json` only when `credential_policy.allow_refresh` and `allow_write_back` allow it; write-back is CAS-guarded and refresh/write-back attempts and failures are audited.", codexChatGPTRefreshURL),
 			NetworkEndpoint:  fmt.Sprintf("`CODEX_BASE_URL`, default `%s`; `POST /responses` for completions. Model listing is static plus any model from Codex config.", codexChatGPTAPIBase),
 			SandboxAndTools:  "No Codex subprocess or Codex CLI workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep function-tool definitions; tool execution happens in Atteler's agent loop.",
 			ModelInventory:   "Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.",
@@ -65,7 +65,7 @@ func providerRuntimeCatalog() map[string]ProviderRuntimeInfo {
 		},
 		providerOpenAI: { // #nosec G101 -- documentation names credential sources, not secret values.
 			ExecutionPath:    "Direct HTTPS calls from atteler to the OpenAI Chat Completions API.",
-			CredentialSource: "`OPENAI_API_KEY`, then the `OPENAI_API_KEY` field in `~/.codex/auth.json`.",
+			CredentialSource: "`OPENAI_API_KEY` by default, then the `OPENAI_API_KEY` field in `~/.codex/auth.json` only when `credential_policy.allowed_stores` includes `codex_auth_json`.",
 			TokenRefresh:     "None; the API key is sent as a bearer token and is not refreshed.",
 			NetworkEndpoint:  fmt.Sprintf("`OPENAI_BASE_URL` or provider config, default `%s`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.", defaultOpenAIBase),
 			SandboxAndTools:  "No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep function-tool definitions in the chat request; tool execution happens in Atteler's agent loop.",

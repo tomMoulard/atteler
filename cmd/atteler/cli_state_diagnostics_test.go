@@ -321,6 +321,32 @@ func TestProviderReportsExposeReadinessReasons(t *testing.T) {
 	assert.Contains(t, reports[0].Error, "assert")
 }
 
+func TestProviderReportsRedactCredentialLikeErrors(t *testing.T) {
+	t.Parallel()
+
+	fakeKey := "sk-" + "statecredential123456"
+	opaqueValue := "state-" + "opaque-value"
+
+	reports := providerReports(llm.ProviderReadinessReport{
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:            "openai",
+				Status:          llm.ProviderStatusFailedHealthCheck,
+				Registered:      true,
+				Error:           errors.New("api_key=" + fakeKey),
+				HealthError:     errors.New("Authorization: Bearer " + opaqueValue),
+				ModelFetchError: errors.New("refresh_token=" + opaqueValue),
+			},
+		},
+	})
+
+	require.Len(t, reports, 1)
+	assert.NotContains(t, reports[0].Error, fakeKey)
+	assert.NotContains(t, reports[0].HealthError, opaqueValue)
+	assert.NotContains(t, reports[0].ModelFetchError, opaqueValue)
+	assert.Contains(t, reports[0].Error, "[REDACTED]")
+}
+
 func TestPrintProviderReadinessReport_ShowsStatusReasonAndModelSource(t *testing.T) { //nolint:paralleltest // Captures process stdout.
 	report := llm.ProviderReadinessReport{
 		Default: llm.DefaultSelectionReport{
@@ -475,6 +501,34 @@ func TestStartupProviderReadinessSummary_IncludesDefaultSelectionWarnings(t *tes
 
 	assert.Contains(t, summary, "default provider missing-provider ignored: unknown provider")
 	assert.Contains(t, summary, "default model other/model ignored: model belongs to another provider")
+}
+
+func TestStartupProviderReadinessSummary_RedactsCredentialLikeErrors(t *testing.T) {
+	t.Parallel()
+
+	fakeKey := "sk-" + "startupcredential123456"
+	opaqueValue := "startup-" + "opaque-value"
+
+	summary := startupProviderReadinessSummary(llm.ProviderReadinessReport{
+		Default: llm.DefaultSelectionReport{
+			Provider:      "openai",
+			Model:         "gpt-test",
+			ProviderError: errors.New("api_key=" + fakeKey),
+			ModelError:    errors.New("Authorization: Bearer " + opaqueValue),
+		},
+		Providers: []llm.ProviderReadiness{
+			{
+				Name:       "openai",
+				Status:     llm.ProviderStatusFailed,
+				Configured: true,
+				Error:      errors.New("refresh_token=" + opaqueValue),
+			},
+		},
+	})
+
+	assert.NotContains(t, summary, fakeKey)
+	assert.NotContains(t, summary, opaqueValue)
+	assert.Contains(t, summary, "[REDACTED]")
 }
 
 func stateDiagnosticsTestApp(cfg appconfig.Config) appState {

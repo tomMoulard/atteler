@@ -29,10 +29,11 @@ const (
 
 // AnthropicProvider calls the Anthropic Messages API.
 type AnthropicProvider struct {
-	client  *http.Client
-	apiKey  string
-	baseURL string
-	bearer  bool
+	client           *http.Client
+	apiKey           string
+	baseURL          string
+	credentialSource credentialProvenance
+	bearer           bool
 }
 
 // NewAnthropicProvider is kept for source compatibility only.
@@ -61,16 +62,17 @@ func NewAnthropicProviderWithConfig(_ ProviderConfig) (*AnthropicProvider, error
 // ResolveAnthropicKeyWithConfigContext and optional config values.
 // ANTHROPIC_BASE_URL overrides cfg.BaseURL.
 func NewAnthropicProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*AnthropicProvider, error) {
-	key, bearer, err := ResolveAnthropicKeyWithConfigContext(ctx, cfg)
+	key, bearer, source, err := resolveAnthropicKeyWithProvenanceContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	return &AnthropicProvider{
-		apiKey:  key,
-		bearer:  bearer,
-		baseURL: configuredBaseURL("ANTHROPIC_BASE_URL", cfg.BaseURL, defaultAnthropicBase),
-		client:  providerHTTPClient(cfg),
+		apiKey:           key,
+		bearer:           bearer,
+		credentialSource: source,
+		baseURL:          configuredBaseURL("ANTHROPIC_BASE_URL", cfg.BaseURL, defaultAnthropicBase),
+		client:           providerHTTPClient(cfg),
 	}, nil
 }
 
@@ -148,15 +150,25 @@ func (a *AnthropicProvider) FetchModels(ctx context.Context) ([]string, error) {
 // routing that requires Anthropic beta headers. This can happen with explicit
 // bearer tokens or borrowed Claude Code/Forge credentials.
 func (a *AnthropicProvider) ProviderWarnings() []string {
-	if !a.bearer {
+	sourceDetail := a.credentialSource.detail()
+	if !a.bearer && a.credentialSource.Store == CredentialStoreEnv {
 		return nil
 	}
 
-	return []string{
-		"uses Anthropic bearer-token auth with beta routing headers; set providers.anthropic.disable_private_adapter, " +
-			"ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1, or ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS=1 " +
-			"to prevent borrowed Claude Code/Forge fallback",
+	var warnings []string
+	if a.bearer {
+		warnings = append(warnings,
+			"uses Anthropic bearer-token auth with beta routing headers; credential source: "+sourceDetail+
+				"; set providers.anthropic.disable_private_adapter, ATTELER_DISABLE_CLAUDE_CODE_ADAPTER=1, "+
+				"or ATTELER_DISABLE_BORROWED_CREDENTIAL_ADAPTERS=1 to prevent borrowed Claude Code/Forge fallback",
+		)
 	}
+
+	if a.credentialSource.Store != "" && a.credentialSource.Store != CredentialStoreEnv {
+		warnings = append(warnings, "uses Anthropic credentials from external credential source: "+sourceDetail)
+	}
+
+	return warnings
 }
 
 // HealthCheck verifies that the Anthropic API is reachable and the credentials

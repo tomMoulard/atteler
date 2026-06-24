@@ -1285,6 +1285,109 @@ plugins:
 	assert.Equal(t, second, pluginOrigin[1].Source)
 }
 
+func TestLoadFiles_MergesProviderCredentialPolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	first := writeConfig(t, dir, "first.yaml", `
+providers:
+  codex:
+    credential_policy:
+      allowed_providers: [codex]
+      allowed_stores: [env]
+      allow_borrowed_oauth: false
+      allow_refresh: false
+      allow_write_back: true
+`)
+	second := writeConfig(t, dir, "second.yaml", `
+providers:
+  codex:
+    credential_policy:
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: false
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{first, second})
+	require.NoError(t, err)
+
+	policy := cfg.Providers["codex"].CredentialPolicy
+	assert.Equal(t, []string{"codex"}, policy.AllowedProviders)
+	assert.True(t, policy.AllowedProvidersSet)
+	assert.Equal(t, []string{"codex_auth_json"}, policy.AllowedStores)
+	assert.True(t, policy.AllowedStoresSet)
+	assert.True(t, policy.AllowBorrowedOAuth)
+	assert.True(t, policy.AllowBorrowedOAuthSet)
+	assert.True(t, policy.AllowRefresh)
+	assert.True(t, policy.AllowRefreshSet)
+	assert.False(t, policy.AllowWriteBack)
+	assert.True(t, policy.AllowWriteBackSet)
+	assert.True(t, policy.Configured)
+
+	storeOrigin := origins["providers.codex.credential_policy.allowed_stores"].Chain
+	require.Len(t, storeOrigin, 2)
+	assert.Equal(t, OriginReplace, storeOrigin[1].Operation)
+	assert.Equal(t, second, storeOrigin[1].Source)
+
+	writeBackOrigin := origins["providers.codex.credential_policy.allow_write_back"].Chain
+	require.Len(t, writeBackOrigin, 2)
+	assert.Equal(t, OriginOverride, writeBackOrigin[1].Operation)
+	assert.Equal(t, second, writeBackOrigin[1].Source)
+}
+
+func TestLoadFiles_PreservesExplicitFalseOnlyCredentialPolicy(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config.yaml", `
+providers:
+  codex:
+    credential_policy:
+      allow_borrowed_oauth: false
+      allow_refresh: false
+      allow_write_back: false
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	policy := cfg.Providers["codex"].CredentialPolicy
+	assert.True(t, policy.Configured)
+	assert.False(t, policy.AllowBorrowedOAuth)
+	assert.True(t, policy.AllowBorrowedOAuthSet)
+	assert.False(t, policy.AllowRefresh)
+	assert.True(t, policy.AllowRefreshSet)
+	assert.False(t, policy.AllowWriteBack)
+	assert.True(t, policy.AllowWriteBackSet)
+	assert.Contains(t, origins, "providers.codex.credential_policy.allow_borrowed_oauth")
+}
+
+func TestLoadFiles_PreservesExplicitEmptyCredentialPolicyLists(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeConfig(t, dir, "config.yaml", `
+providers:
+  codex:
+    credential_policy:
+      allowed_providers: []
+      allowed_stores: []
+`)
+
+	cfg, _, origins, err := LoadFilesWithOrigins([]string{path})
+	require.NoError(t, err)
+
+	policy := cfg.Providers["codex"].CredentialPolicy
+	assert.True(t, policy.Configured)
+	assert.Empty(t, policy.AllowedProviders)
+	assert.True(t, policy.AllowedProvidersSet)
+	assert.Empty(t, policy.AllowedStores)
+	assert.True(t, policy.AllowedStoresSet)
+	assert.Contains(t, origins, "providers.codex.credential_policy.allowed_providers")
+	assert.Contains(t, origins, "providers.codex.credential_policy.allowed_stores")
+}
+
 func TestOriginChain_MergesMapOriginsAcrossOriginMaps(t *testing.T) {
 	t.Parallel()
 

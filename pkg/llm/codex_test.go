@@ -282,7 +282,7 @@ func TestLoadCodexChatGPTAuthPermissionPolicyDeniesAuthFileRead(t *testing.T) {
 	ctx := permission.ContextWithPolicy(t.Context(), &policy)
 	ctx = permission.ContextWithAuditDir(ctx, auditDir)
 
-	_, err := loadCodexChatGPTAuthContext(ctx, filepath.Dir(authPath))
+	_, err := loadCodexChatGPTAuthContext(ContextWithCredentialSourcePolicy(ctx, permissiveCredentialSourcePolicy()), filepath.Dir(authPath))
 	require.Error(t, err)
 	require.True(t, permission.ErrDenied(err))
 	assert.Contains(t, err.Error(), "permission.read.deny")
@@ -644,7 +644,7 @@ func TestCodexProvider_RefreshOn401(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	auth.refreshURL = refreshSrv.URL
@@ -697,7 +697,7 @@ func TestCodexProvider_RefreshFailureSurfaced(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	auth.refreshURL = refreshSrv.URL
@@ -826,7 +826,7 @@ func TestCodexProvider_RefreshHonorsCanceledContext(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	auth.refreshURL = refreshSrv.URL
@@ -881,7 +881,7 @@ func TestCodexProvider_MissingRefreshTokenFailsLoudlyOn401(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	p := &CodexProvider{client: apiSrv.Client(), auth: auth, baseURL: apiSrv.URL, models: []string{"gpt-5.5"}}
@@ -901,7 +901,7 @@ func TestLoadCodexChatGPTAuth(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	access, accountID := auth.snapshot()
@@ -914,7 +914,7 @@ func TestLoadCodexChatGPTAuth_AllowsMissingRefreshForDiagnostics(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "access-1", "", "acct-42")
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	access, accountID := auth.snapshot()
@@ -930,7 +930,7 @@ func TestLoadCodexChatGPTAuth_RejectsAPIKeyMode(t *testing.T) {
 	authJSON := `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test","tokens":{"access_token":"","refresh_token":""}}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.json"), []byte(authJSON), 0o600))
 
-	_, err := loadCodexChatGPTAuthContext(context.Background(), dir)
+	_, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), dir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth_mode")
 }
@@ -940,9 +940,26 @@ func TestLoadCodexChatGPTAuth_RejectsMissingAccessToken(t *testing.T) {
 
 	authPath := writeCodexAuthFile(t, "", "refresh-1", "acct-42")
 
-	_, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	_, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing access_token")
+}
+
+func TestLoadCodexChatGPTAuth_MissingAccessTokenRedactsPathSecrets(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "api_key=path-secret")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.json"), []byte(`{
+		"auth_mode":"chatgpt",
+		"tokens":{"access_token":"","refresh_token":"refresh-secret"}
+	}`), 0o600))
+
+	_, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key=[REDACTED]")
+	assert.NotContains(t, err.Error(), "path-secret")
+	assert.NotContains(t, err.Error(), "refresh-secret")
 }
 
 func TestPersistRefreshedCodexAuth_AtomicAndPreservesUnknown(t *testing.T) {
@@ -995,7 +1012,7 @@ func TestPersistRefreshedCodexAuth_RequiresActiveContext(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	access, accountID := auth.snapshot()
@@ -1020,7 +1037,7 @@ func TestPersistRefreshedCodexAuth_PermissionPolicyDeniesWrite(t *testing.T) {
 	require.True(t, permission.ErrDenied(err))
 	assert.Contains(t, err.Error(), "permission.write.deny")
 
-	auth, loadErr := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, loadErr := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, loadErr)
 
 	access, accountID := auth.snapshot()
@@ -1030,6 +1047,228 @@ func TestPersistRefreshedCodexAuth_PermissionPolicyDeniesWrite(t *testing.T) {
 	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
 	require.NoError(t, readErr)
 	assert.Contains(t, string(auditData), "permission.write.deny")
+
+	credentialAuditData, credentialAuditErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, credentialAuditErr)
+
+	credentialAudit := string(credentialAuditData)
+	assert.Contains(t, credentialAudit, credentialAuditEventWriteBack)
+	assert.Contains(t, credentialAudit, `"decision":"failed"`)
+	assert.Contains(t, credentialAudit, "permission.write.deny")
+	assert.NotContains(t, credentialAudit, "new-access")
+	assert.NotContains(t, credentialAudit, "new-refresh")
+	assert.NotContains(t, credentialAudit, "new-id")
+}
+
+func TestPersistRefreshedCodexAuth_AuditsWriteBackWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "old-access", "old-refresh", "account-secret-123456")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(t.Context(), auditDir)
+
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      authPath,
+		Identifier:    "account-secret-123456",
+		BorrowedOAuth: true,
+	}
+
+	_, err := persistRefreshedCodexAuthWithCAS(
+		ctx,
+		authPath,
+		"old-access",
+		"old-refresh",
+		"new-access-secret",
+		"new-refresh-secret",
+		"new-id-secret",
+		source,
+		ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()},
+	)
+	require.NoError(t, err)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, providerCodex)
+	assert.Contains(t, audit, CredentialStoreCodexAuthJSON)
+	assert.NotContains(t, audit, "old-access")
+	assert.NotContains(t, audit, "old-refresh")
+	assert.NotContains(t, audit, "new-access-secret")
+	assert.NotContains(t, audit, "new-refresh-secret")
+	assert.NotContains(t, audit, "new-id-secret")
+	assert.NotContains(t, audit, "account-secret-123456")
+	assert.Contains(t, audit, "sha256:")
+}
+
+func TestPersistRefreshedCodexAuth_WriteBackFailureIsAudited(t *testing.T) {
+	t.Parallel()
+
+	authDir := filepath.Join(t.TempDir(), "api_key=path-secret")
+	require.NoError(t, os.MkdirAll(authDir, 0o700))
+
+	authPath := filepath.Join(authDir, "auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens":`), 0o600))
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      authPath,
+		Identifier:    "acct-secret",
+		BorrowedOAuth: true,
+	}
+
+	_, err := persistRefreshedCodexAuthWithCAS(
+		ctx,
+		authPath,
+		"old-access-secret",
+		"old-refresh-secret",
+		"new-access-secret",
+		"new-refresh-secret",
+		"new-id-secret",
+		source,
+		ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()},
+	)
+	require.Error(t, err)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "api_key=[REDACTED]")
+	assert.Contains(t, audit, "sha256:")
+	assert.NotContains(t, audit, "path-secret")
+	assert.NotContains(t, audit, "acct-secret")
+	assert.NotContains(t, audit, "old-access-secret")
+	assert.NotContains(t, audit, "old-refresh-secret")
+	assert.NotContains(t, audit, "new-access-secret")
+	assert.NotContains(t, audit, "new-refresh-secret")
+	assert.NotContains(t, audit, "new-id-secret")
+}
+
+func TestPersistRefreshedCodexAuth_CASPreventsStaleWriteBack(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "old-access", "old-refresh", "acct-9")
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      authPath,
+		BorrowedOAuth: true,
+	}
+	cfg := ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()}
+
+	first, err := persistRefreshedCodexAuthWithCAS(
+		t.Context(),
+		authPath,
+		"old-access",
+		"old-refresh",
+		"winner-access",
+		"winner-refresh",
+		"winner-id",
+		source,
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "winner-access", first.accessToken)
+
+	second, err := persistRefreshedCodexAuthWithCAS(
+		t.Context(),
+		authPath,
+		"old-access",
+		"old-refresh",
+		"stale-access",
+		"stale-refresh",
+		"stale-id",
+		source,
+		cfg,
+	)
+	require.Error(t, err)
+	assert.True(t, isCredentialFileCASMismatch(err))
+	assert.Equal(t, "winner-access", second.accessToken)
+
+	updated, readErr := os.ReadFile(authPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(updated), "winner-access")
+	assert.NotContains(t, string(updated), "stale-access")
+}
+
+func TestCodexChatGPTAuthRefresh_ConcurrentRefreshUsesCASWinner(t *testing.T) {
+	t.Parallel()
+
+	authPath := writeCodexAuthFile(t, "access-1", "refresh-1", "acct-42")
+
+	var refreshHits atomic.Int32
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit := refreshHits.Add(1) + 1
+
+		var req map[string]string
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
+
+		assert.Equal(t, "refresh-1", req["refresh_token"])
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+			"access_token":  fmt.Sprintf("access-%d", hit),
+			"refresh_token": fmt.Sprintf("refresh-%d", hit),
+			"id_token":      fmt.Sprintf("id-%d", hit),
+		}))
+	}))
+	defer refreshSrv.Close()
+
+	auth1, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
+	require.NoError(t, err)
+	auth2, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
+	require.NoError(t, err)
+
+	for _, auth := range []*codexChatGPTAuth{auth1, auth2} {
+		auth.refreshURL = refreshSrv.URL
+		auth.httpClient = refreshSrv.Client()
+	}
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	errCh := make(chan error, 2)
+
+	go func() { errCh <- auth1.refresh(ctx, "access-1") }()
+	go func() { errCh <- auth2.refresh(ctx, "access-1") }()
+
+	for range 2 {
+		require.NoError(t, <-errCh)
+	}
+
+	persisted, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+
+	var diskAuth codexAuth
+	require.NoError(t, json.Unmarshal(persisted, &diskAuth))
+	require.Contains(t, []string{"access-2", "access-3"}, diskAuth.Tokens.AccessToken)
+	assert.Contains(t, []string{"refresh-2", "refresh-3"}, diskAuth.Tokens.RefreshToken)
+
+	auth1Access, _ := auth1.snapshot()
+	auth2Access, _ := auth2.snapshot()
+
+	assert.Equal(t, diskAuth.Tokens.AccessToken, auth1Access)
+	assert.Equal(t, diskAuth.Tokens.AccessToken, auth2Access)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), credentialAuditEventCAS)
+	assert.NotContains(t, string(auditData), "access-2")
+	assert.NotContains(t, string(auditData), "access-3")
 }
 
 func TestCodexConfiguredModelContext(t *testing.T) {
@@ -1080,6 +1319,7 @@ func TestNewCodexProviderPermissionPolicyDeniesAuthFileRead(t *testing.T) {
 	policy.SetMode(permission.OperationRead, permission.ModeDeny)
 
 	ctx := permission.ContextWithPolicy(t.Context(), &policy)
+	ctx = ContextWithCredentialSourcePolicy(ctx, permissiveCredentialSourcePolicy())
 	_, err := NewCodexProviderWithConfigContext(ctx, ProviderConfig{})
 
 	require.Error(t, err)
@@ -1164,6 +1404,10 @@ func TestCodexProvider_AdapterDiagnostics(t *testing.T) {
 	checks := readinessChecksByName(diagnostics.Checks)
 	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
 	assert.Equal(t, ReadinessOK, checks["token_refresh"].Status)
+	assert.Equal(t, ReadinessOK, checks["credential_provenance"].Status)
+	assert.Contains(t, checks["credential_provenance"].Detail, CredentialStoreCodexAuthJSON)
+	assert.NotContains(t, checks["credential_provenance"].Detail, "access-1")
+	assert.Contains(t, checks["credential_policy"].Detail, "allow_borrowed_oauth=true")
 	assert.Equal(t, ReadinessSkipped, checks["network_reachability"].Status)
 	assert.Equal(t, ReadinessWarning, checks["model_availability"].Status)
 	assert.Contains(t, diagnostics.Warnings[0], "static")
@@ -1410,6 +1654,10 @@ func TestCodexExtractFunctionCall_NonFunctionCallType(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+func permissiveCredentialContext(ctx context.Context) context.Context {
+	return ContextWithCredentialSourcePolicy(ctx, permissiveCredentialSourcePolicy())
+}
+
 func newTestCodexAuth(t *testing.T, values ...string) *codexChatGPTAuth {
 	t.Helper()
 
@@ -1428,7 +1676,7 @@ func newTestCodexAuth(t *testing.T, values ...string) *codexChatGPTAuth {
 
 	authPath := writeCodexAuthFile(t, access, refresh, accountID)
 
-	auth, err := loadCodexChatGPTAuthContext(context.Background(), filepath.Dir(authPath))
+	auth, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), filepath.Dir(authPath))
 	require.NoError(t, err)
 
 	return auth

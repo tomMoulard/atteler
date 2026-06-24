@@ -535,7 +535,7 @@ func printProviderReadinessReport(report llm.ProviderReadinessReport) int {
 
 func printDefaultSelectionLine(kind, value string, err error) {
 	if err != nil {
-		fmt.Printf("  [%s] %s: %s (%v)\n", statusWarn, kind, value, err)
+		fmt.Printf("  [%s] %s: %s (%s)\n", statusWarn, kind, value, errorString(err))
 
 		return
 	}
@@ -588,10 +588,10 @@ func providerReadinessDisplayError(err error) string {
 	}
 
 	if summary, ok := llm.ProviderFailureRemediationSummary(err); ok {
-		return summary
+		return llm.RedactDiagnosticMessage(summary)
 	}
 
-	return err.Error()
+	return llm.RedactDiagnosticMessage(err.Error())
 }
 
 func errorString(err error) string {
@@ -599,7 +599,7 @@ func errorString(err error) string {
 		return ""
 	}
 
-	return err.Error()
+	return llm.RedactDiagnosticMessage(err.Error())
 }
 
 func printProviderReadinessModels(provider *llm.ProviderReadiness) {
@@ -1196,6 +1196,7 @@ func llmConfig(
 
 		providers[name] = llm.ProviderConfig{
 			Type:                  provider.Type,
+			CredentialPolicy:      llmCredentialPolicyFromConfig(provider.CredentialPolicy),
 			APIKeyEnv:             provider.APIKeyEnv,
 			APIKeyHeader:          provider.APIKeyHeader,
 			APIKeyScheme:          provider.APIKeyScheme,
@@ -1230,6 +1231,33 @@ func llmConfig(
 		CommandLine:     append([]string(nil), commandLine...),
 		Providers:       providers,
 	}
+}
+
+func llmCredentialPolicyFromConfig(policy appconfig.CredentialPolicyConfig) llm.CredentialSourcePolicy {
+	return llm.CredentialSourcePolicy{
+		AllowedProviders:    append([]string(nil), policy.AllowedProviders...),
+		AllowedStores:       append([]string(nil), policy.AllowedStores...),
+		Configured:          credentialPolicyConfigured(policy),
+		AllowedProvidersSet: policy.AllowedProvidersSet,
+		AllowedStoresSet:    policy.AllowedStoresSet,
+		AllowBorrowedOAuth:  policy.AllowBorrowedOAuth,
+		AllowRefresh:        policy.AllowRefresh,
+		AllowWriteBack:      policy.AllowWriteBack,
+	}
+}
+
+func credentialPolicyConfigured(policy appconfig.CredentialPolicyConfig) bool {
+	return policy.Configured ||
+		policy.AllowedProvidersSet ||
+		policy.AllowedStoresSet ||
+		policy.AllowBorrowedOAuthSet ||
+		policy.AllowRefreshSet ||
+		policy.AllowWriteBackSet ||
+		policy.AllowedProviders != nil ||
+		policy.AllowedStores != nil ||
+		policy.AllowBorrowedOAuth ||
+		policy.AllowRefresh ||
+		policy.AllowWriteBack
 }
 
 func llmModelRolesFromConfig(roles map[string]appconfig.ModelRoleConfig) map[string]llm.ModelRole {

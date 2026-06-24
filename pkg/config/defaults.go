@@ -254,6 +254,31 @@ func DefaultDiagnostics() []DefaultDiagnostic {
 			Message: "private provider adapters remain eligible unless a provider config or environment kill switch disables them",
 		},
 		{
+			Field:   "providers.*.credential_policy.allowed_providers",
+			Value:   "[]",
+			Message: "credential-source policy accepts any resolved provider name unless this list narrows it",
+		},
+		{
+			Field:   "providers.*.credential_policy.allowed_stores",
+			Value:   "[env]",
+			Message: "credential-source policy only permits environment variables unless additional stores are explicitly allowed",
+		},
+		{
+			Field:   "providers.*.credential_policy.allow_borrowed_oauth",
+			Value:   "false",
+			Message: "borrowed OAuth sessions from other tools are denied unless explicitly allowed",
+		},
+		{
+			Field:   "providers.*.credential_policy.allow_refresh",
+			Value:   "false",
+			Message: "borrowed OAuth refresh is denied unless explicitly allowed",
+		},
+		{
+			Field:   "providers.*.credential_policy.allow_write_back",
+			Value:   "false",
+			Message: "credential write-back to external CLI stores is denied unless explicitly allowed",
+		},
+		{
 			Field:   "providers.*.local",
 			Value:   "false",
 			Message: "custom providers are treated as remote unless local is true or the provider can infer loopback/self-hosted execution",

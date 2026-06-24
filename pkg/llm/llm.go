@@ -1041,7 +1041,7 @@ func (r *Registry) recordRouteFailureWithScope(providerName, requestedModel stri
 
 	telemetry.RecordFailure(candidate, modelroute.Failure{
 		RetryAfter:     decision.retryAfter,
-		Error:          err.Error(),
+		Error:          RedactDiagnosticMessage(err.Error()),
 		Kind:           string(classification.Kind),
 		RateLimitScope: rateLimitScope,
 		Retryable:      decision.retryable,

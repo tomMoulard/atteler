@@ -150,6 +150,48 @@ func TestProviderRequestID_RecognizesProviderHeaderVariants(t *testing.T) {
 	}
 }
 
+func TestProviderRequestID_RedactsSecretLikeHeaderValues(t *testing.T) {
+	t.Parallel()
+
+	err := newProviderHTTPError(providerOpenAI, &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header: http.Header{
+			"X-Request-Id": []string{"req api_key=sk-request-id-secret"},
+		},
+	}, []byte(`{"error":"denied"}`))
+
+	require.NotNil(t, err)
+	assert.Equal(t, "req api_key=[REDACTED]", err.RequestID)
+	assert.Contains(t, err.Error(), "request_id=req api_key=[REDACTED]")
+	assert.NotContains(t, err.Error(), "sk-request-id-secret")
+}
+
+func TestProviderError_RedactsManualDiagnosticFields(t *testing.T) {
+	t.Parallel()
+
+	err := (&ProviderError{
+		Provider:   providerOpenAI,
+		StatusCode: http.StatusUnauthorized,
+		RequestID:  "api_key=sk-request-secret123456",
+		Message:    "Authorization: Bearer manual-secret-token",
+	}).Error()
+
+	assert.Contains(t, err, "request_id=api_key=[REDACTED]")
+	assert.Contains(t, err, "Authorization: [REDACTED]")
+	assert.NotContains(t, err, "sk-request-secret123456")
+	assert.NotContains(t, err, "manual-secret-token")
+}
+
+func TestProviderErrorMessage_RedactionIsIdempotentForAuthorizationAssignments(t *testing.T) {
+	t.Parallel()
+
+	message := providerErrorMessage([]byte(`{"message":"Authorization: Bearer secret-token-value"}`))
+
+	assert.Equal(t, "Authorization: [REDACTED]", message)
+	assert.NotContains(t, message, "secret-token-value")
+	assert.NotContains(t, message, "[REDACTED]]")
+}
+
 func TestProviderErrorMessage_TruncatesBodies(t *testing.T) {
 	t.Parallel()
 

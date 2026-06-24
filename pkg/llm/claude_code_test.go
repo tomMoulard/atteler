@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -760,6 +761,124 @@ func TestPersistRefreshedClaudeCodeFile_PermissionPolicyDeniesWrite(t *testing.T
 	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
 	require.NoError(t, readErr)
 	assert.Contains(t, string(auditData), "permission.write.deny")
+
+	credentialAuditData, credentialAuditErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, credentialAuditErr)
+
+	credentialAudit := string(credentialAuditData)
+	assert.Contains(t, credentialAudit, credentialAuditEventWriteBack)
+	assert.Contains(t, credentialAudit, `"decision":"failed"`)
+	assert.Contains(t, credentialAudit, "permission.write.deny")
+	assert.NotContains(t, credentialAudit, "new-access")
+	assert.NotContains(t, credentialAudit, "new-refresh")
+}
+
+func TestClaudeCodeAuthRefresh_AuditsPersisterIdentifierWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-access-audit",
+			"refresh_token": "new-refresh-audit",
+			"expires_in":    3600,
+		}))
+	}))
+	defer refreshSrv.Close()
+
+	auth := newClaudeCodeAuthFromBlock(claudeOAuthBlock{
+		AccessToken:  "old-access-audit",
+		RefreshToken: "old-refresh-audit",
+		ExpiresAt:    1,
+	}, &recordingClaudeCodePersister{
+		locationValue:   claudeCodeKeychainSource,
+		identifierValue: "keychain-account-audit",
+	})
+	auth.refreshURL = refreshSrv.URL
+	auth.httpClient = refreshSrv.Client()
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	require.NoError(t, auth.refresh(ctx, "old-access-audit"))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, "sha256:")
+	assert.NotContains(t, audit, "keychain-account-audit")
+	assert.NotContains(t, audit, "old-access-audit")
+	assert.NotContains(t, audit, "old-refresh-audit")
+	assert.NotContains(t, audit, "new-access-audit")
+	assert.NotContains(t, audit, "new-refresh-audit")
+}
+
+func TestClaudeCodeAuthRefresh_ConcurrentRefreshUsesCASWinner(t *testing.T) {
+	t.Parallel()
+
+	credPath := writeClaudeCodeCredentialsFile(t, "access-1", "refresh-1", futureExpiry())
+
+	var refreshHits atomic.Int32
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit := refreshHits.Add(1) + 1
+
+		var req map[string]string
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
+
+		assert.Equal(t, "refresh-1", req["refresh_token"])
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  fmt.Sprintf("access-%d", hit),
+			"refresh_token": fmt.Sprintf("refresh-%d", hit),
+			"expires_in":    3600,
+		}))
+	}))
+	defer refreshSrv.Close()
+
+	auth1, err := loadClaudeCodeAuthFromFile(credPath)
+	require.NoError(t, err)
+	auth2, err := loadClaudeCodeAuthFromFile(credPath)
+	require.NoError(t, err)
+
+	for _, auth := range []*claudeCodeAuth{auth1, auth2} {
+		auth.refreshURL = refreshSrv.URL
+		auth.httpClient = refreshSrv.Client()
+	}
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	errCh := make(chan error, 2)
+
+	go func() { errCh <- auth1.refresh(ctx, "access-1") }()
+	go func() { errCh <- auth2.refresh(ctx, "access-1") }()
+
+	for range 2 {
+		require.NoError(t, <-errCh)
+	}
+
+	persisted, err := os.ReadFile(credPath)
+	require.NoError(t, err)
+
+	block, err := parseClaudeCodeCredentialsRaw(persisted)
+	require.NoError(t, err)
+	require.Contains(t, []string{"access-2", "access-3"}, block.AccessToken)
+	assert.Contains(t, []string{"refresh-2", "refresh-3"}, block.RefreshToken)
+
+	assert.Equal(t, block.AccessToken, auth1.snapshot())
+	assert.Equal(t, block.AccessToken, auth2.snapshot())
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(auditData), credentialAuditEventCAS)
+	assert.NotContains(t, string(auditData), "access-2")
+	assert.NotContains(t, string(auditData), "access-3")
 }
 
 func TestLoadClaudeCodeAuth_FilePath(t *testing.T) {
@@ -774,7 +893,7 @@ func TestLoadClaudeCodeAuth_FilePath(t *testing.T) {
 	body := `{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":9999999999999}}`
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 
-	auth, err := loadClaudeCodeAuth(context.Background())
+	auth, err := loadClaudeCodeAuth(ContextWithCredentialSourcePolicy(context.Background(), CredentialSourcePolicy{AllowedStores: []string{CredentialStoreClaudeCodeFile}, AllowBorrowedOAuth: true}))
 	require.NoError(t, err)
 
 	assert.Equal(t, "a", auth.snapshot())
@@ -847,6 +966,10 @@ func TestClaudeCodeProvider_AdapterDiagnostics(t *testing.T) {
 	checks := readinessChecksByName(diagnostics.Checks)
 	assert.Equal(t, ReadinessOK, checks["local_credentials"].Status)
 	assert.Equal(t, ReadinessOK, checks["token_refresh"].Status)
+	assert.Equal(t, ReadinessOK, checks["credential_provenance"].Status)
+	assert.Contains(t, checks["credential_provenance"].Detail, CredentialStoreClaudeCodeFile)
+	assert.NotContains(t, checks["credential_provenance"].Detail, "access-1")
+	assert.Contains(t, checks["credential_policy"].Detail, "allow_borrowed_oauth=true")
 	assert.Equal(t, ReadinessSkipped, checks["network_reachability"].Status)
 	assert.Equal(t, ReadinessWarning, checks["model_availability"].Status)
 	assert.Contains(t, diagnostics.Warnings[0], "beta")
@@ -895,6 +1018,19 @@ func TestNewClaudeCodeProviderWithConfig_HonorsPrivateAdapterEnvKillSwitchBefore
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type recordingClaudeCodePersister struct {
+	locationValue   string
+	identifierValue string
+}
+
+func (p *recordingClaudeCodePersister) persist(_ context.Context, _, _ string, _ int64) error {
+	return nil
+}
+
+func (p *recordingClaudeCodePersister) location() string { return p.locationValue }
+
+func (p *recordingClaudeCodePersister) identifier() string { return p.identifierValue }
 
 func newTestClaudeCodeAuth(t *testing.T, access, refresh string, expiresAtMs int64) *claudeCodeAuth {
 	t.Helper()

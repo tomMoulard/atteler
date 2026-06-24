@@ -36,15 +36,16 @@ const (
 
 // OpenAIProvider calls the OpenAI Chat Completions API.
 type OpenAIProvider struct {
-	client         *http.Client
-	apiKey         string
-	providerName   string
-	authHeader     string
-	authScheme     string
-	chatPath       string
-	embeddingsPath string
-	modelsPath     string
-	apiVersion     string
+	client           *http.Client
+	apiKey           string
+	providerName     string
+	authHeader       string
+	authScheme       string
+	credentialSource credentialProvenance
+	chatPath         string
+	embeddingsPath   string
+	modelsPath       string
+	apiVersion       string
 	// baseURL can be rewritten at runtime when OpenAI reports a regional
 	// hostname mismatch (see applyRegionalHostnameCorrection); access it through
 	// currentBaseURL so reads and writes are serialized by mu.
@@ -82,7 +83,7 @@ func NewOpenAIProviderWithConfig(_ ProviderConfig) (*OpenAIProvider, error) {
 // ResolveOpenAIKeyContext and optional config values. OPENAI_BASE_URL overrides
 // cfg.BaseURL.
 func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OpenAIProvider, error) {
-	key, bearer, err := ResolveOpenAIKeyContext(ctx)
+	key, source, err := resolveOpenAIKeyWithProvenanceContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -90,18 +91,31 @@ func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig)
 	baseURL := configuredBaseURL("OPENAI_BASE_URL", cfg.BaseURL, defaultOpenAIBase)
 
 	return &OpenAIProvider{
-		apiKey:         key,
-		bearer:         bearer,
-		baseURL:        baseURL,
-		providerName:   providerOpenAI,
-		authHeader:     "Authorization",
-		authScheme:     "Bearer",
-		chatPath:       defaultOpenAIChatPath,
-		embeddingsPath: defaultOpenAIEmbeddingsPath,
-		modelsPath:     defaultOpenAIModelsPath,
-		client:         providerHTTPClient(cfg),
-		local:          cfg.Local || isLocalEndpoint(baseURL),
+		apiKey:           key,
+		bearer:           false,
+		baseURL:          baseURL,
+		providerName:     providerOpenAI,
+		authHeader:       "Authorization",
+		authScheme:       "Bearer",
+		credentialSource: source,
+		chatPath:         defaultOpenAIChatPath,
+		embeddingsPath:   defaultOpenAIEmbeddingsPath,
+		modelsPath:       defaultOpenAIModelsPath,
+		client:           providerHTTPClient(cfg),
+		local:            cfg.Local || isLocalEndpoint(baseURL),
 	}, nil
+}
+
+// ProviderWarnings reports when the OpenAI adapter uses credentials borrowed
+// from another CLI's store instead of the process environment.
+func (o *OpenAIProvider) ProviderWarnings() []string {
+	if o == nil || o.providerName != providerOpenAI || o.credentialSource.Store != CredentialStoreCodexAuthJSON {
+		return nil
+	}
+
+	return []string{
+		"uses OpenAI API key from external credential source: " + o.credentialSource.detail(),
+	}
 }
 
 // NewOpenAICompatibleProviderWithConfigContext creates a provider for endpoints
@@ -139,7 +153,7 @@ func NewOpenAICompatibleProviderWithConfigContext(ctx context.Context, name stri
 		return nil, err
 	}
 
-	apiKey, err := openAICompatibleAPIKey(ctx, name, cfg.APIKeyEnv)
+	apiKey, err := openAICompatibleAPIKey(ctx, name, cfg.APIKeyEnv, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +293,7 @@ func normalizeOpenAIProviderType(providerType string) string {
 	}
 }
 
-func openAICompatibleAPIKey(ctx context.Context, providerName, envName string) (string, error) {
+func openAICompatibleAPIKey(ctx context.Context, providerName, envName string, cfg ProviderConfig) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return "", err
 	}
@@ -292,6 +306,14 @@ func openAICompatibleAPIKey(ctx context.Context, providerName, envName string) (
 	value := strings.TrimSpace(os.Getenv(envName))
 	if value == "" {
 		return "", fmt.Errorf("openai-compatible: provider %q has no credentials: set %s", providerName, envName)
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:    providerName,
+		Store:       CredentialStoreEnv,
+		Description: envName,
+	}, credentialActionUse); err != nil {
+		return "", err
 	}
 
 	return value, nil

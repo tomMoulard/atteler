@@ -14,14 +14,6 @@ import (
 	"github.com/tommoulard/atteler/pkg/shell"
 )
 
-// keychainService is the macOS Keychain "service" attribute under which the
-// claude CLI stores its OAuth credentials.
-const keychainService = "Claude Code-credentials"
-
-// claudeCodeKeychainSource is the diagnostic location string used when
-// credentials originate from the macOS keychain.
-const claudeCodeKeychainSource = "keychain:" + keychainService
-
 // readClaudeCodeKeychain reads the Claude Code OAuth token from the macOS Keychain.
 func readClaudeCodeKeychain(ctx context.Context) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
@@ -110,6 +102,8 @@ type claudeCodeKeychainPersister struct {
 }
 
 func (p *claudeCodeKeychainPersister) location() string { return claudeCodeKeychainSource }
+
+func (p *claudeCodeKeychainPersister) identifier() string { return p.account }
 
 func (p *claudeCodeKeychainPersister) persist(ctx context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
 	current, err := readClaudeCodeKeychainPassword(ctx)
