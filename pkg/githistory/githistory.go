@@ -1,5 +1,5 @@
-// Package githistory provides dependency-free parsing and lexical search for
-// git history text captured by callers.
+// Package githistory provides git-backed history collection plus parsing and
+// explainable search over collected commits.
 package githistory
 
 import (
@@ -23,13 +23,39 @@ const (
 
 // Commit is one git history entry parsed from git log text.
 type Commit struct {
-	Date        time.Time
-	Hash        string
-	AuthorName  string
-	AuthorEmail string
-	Subject     string
-	Body        string
-	Files       []string
+	Date          time.Time
+	Hash          string
+	AuthorName    string
+	AuthorEmail   string
+	Subject       string
+	Body          string
+	Files         []string
+	Changes       []ChangedFile
+	Relations     CommitRelations
+	Diff          string
+	DiffTruncated bool
+	Refs          []string
+}
+
+// ChangedFile describes one path touched by a commit.
+type ChangedFile struct {
+	Path    string
+	OldPath string
+	Status  string
+	Added   int
+	Deleted int
+	Binary  bool
+	Renamed bool
+}
+
+// CommitRelations captures history relationships inferred from commit
+// metadata and messages.
+type CommitRelations struct {
+	Reverts   []string
+	IssueRefs []string
+	PRRefs    []string
+	Fixup     bool
+	Squash    bool
 }
 
 // Snippet is a representative matching excerpt from a commit.
@@ -38,11 +64,22 @@ type Snippet struct {
 	Text  string
 }
 
+// MatchEvidence records why a commit matched a query.
+type MatchEvidence struct {
+	Field  string
+	Term   string
+	Text   string
+	Weight int
+}
+
 // Result is one ranked commit search match.
 type Result struct {
-	Commit   Commit
-	Snippets []Snippet
-	Score    int
+	Commit       Commit
+	Snippets     []Snippet
+	Matches      []MatchEvidence
+	RangeContext string
+	Confidence   float64
+	Score        int
 }
 
 // Index is an in-memory lexical index over parsed commits.
@@ -117,7 +154,8 @@ func NewIndex(commits []Commit) *Index {
 	return idx
 }
 
-// Search ranks commits matching query across subject, body, files, and author.
+// Search ranks commits matching query across subject, body, files, author,
+// relations, and optional bounded diff context.
 // A limit less than one returns every match.
 func (idx *Index) Search(query string, limit int) []Result {
 	query = strings.TrimSpace(query)
@@ -136,16 +174,19 @@ func (idx *Index) Search(query string, limit int) []Result {
 	for i := range idx.commits {
 		entry := &idx.commits[i]
 
-		score, snippets := scoreCommit(entry.commit, terms, normalizedQuery, query)
+		score, snippets, matches := scoreCommit(entry.commit, terms, normalizedQuery, query)
 		if score == 0 {
 			continue
 		}
 
 		results = append(results, rankedResult{
 			result: Result{
-				Commit:   cloneCommit(entry.commit),
-				Snippets: snippets,
-				Score:    score,
+				Commit:       cloneCommit(entry.commit),
+				Snippets:     snippets,
+				Matches:      matches,
+				RangeContext: rangeContext(entry.commit),
+				Confidence:   confidenceForScore(score, matches),
+				Score:        score,
 			},
 			order: entry.order,
 		})
@@ -251,6 +292,27 @@ func gitRetrievalResult(result Result, query retrieval.Query) retrieval.Result {
 	if len(result.Snippets) > 0 {
 		metadata["matched_field"] = result.Snippets[0].Field
 	}
+	if fields := matchedFields(result.Matches); fields != "" {
+		metadata["matched_fields"] = fields
+	}
+	if result.RangeContext != "" {
+		metadata["range_context"] = result.RangeContext
+	}
+	if result.Confidence > 0 {
+		metadata["confidence"] = fmt.Sprintf("%.2f", result.Confidence)
+	}
+	if len(commit.Changes) > 0 {
+		metadata["changed_files"] = sanitizedGitMetadata(changedFilesMetadata(commit.Changes), source, documentID, "changed_files", &safety)
+	}
+	if len(commit.Relations.Reverts) > 0 {
+		metadata["reverts"] = strings.Join(commit.Relations.Reverts, "\n")
+	}
+	if len(commit.Relations.IssueRefs) > 0 {
+		metadata["issue_refs"] = strings.Join(commit.Relations.IssueRefs, "\n")
+	}
+	if len(commit.Relations.PRRefs) > 0 {
+		metadata["pr_refs"] = strings.Join(commit.Relations.PRRefs, "\n")
+	}
 
 	var metadataSafety retrieval.Safety
 
@@ -266,14 +328,15 @@ func gitRetrievalResult(result Result, query retrieval.Query) retrieval.Result {
 	}
 
 	scorer := retrieval.Scorer{
-		Name: "git-history-weighted-lexical",
+		Name: "git-history-explainable-weighted",
 		Raw:  float64(result.Score),
 		Details: map[string]float64{
 			"weighted_score": float64(result.Score),
+			"confidence":     result.Confidence,
 		},
 	}
 	if query.Explain {
-		scorer.Explanation = []string{"ranked by weighted lexical matches across subject, body, files, author, and hash"}
+		scorer.Explanation = rankingExplanation(result)
 	}
 
 	return retrieval.NormalizeResult(retrieval.Result{
@@ -315,6 +378,15 @@ func commitText(commit Commit) string {
 
 	if len(commit.Files) > 0 {
 		parts = append(parts, strings.Join(commit.Files, "\n"))
+	}
+	if len(commit.Changes) > 0 {
+		parts = append(parts, changedFilesMetadata(commit.Changes))
+	}
+	if commit.Diff != "" {
+		parts = append(parts, commit.Diff)
+	}
+	if relations := relationsText(commit.Relations); relations != "" {
+		parts = append(parts, relations)
 	}
 
 	if commit.AuthorName != "" || commit.AuthorEmail != "" {
@@ -361,11 +433,13 @@ func isHeaderLine(line string) bool {
 	return strings.Count(line, fieldSeparator) >= 4
 }
 
-func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery string) (int, []Snippet) {
+func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery string) (int, []Snippet, []MatchEvidence) {
 	fields := []searchField{
 		{name: "subject", text: commit.Subject, weight: 40},
 		{name: "body", text: commit.Body, weight: 30},
-		{name: "files", text: strings.Join(commit.Files, "\n"), weight: 20},
+		{name: "files", text: strings.Join(commit.Files, "\n") + "\n" + changedFilesMetadata(commit.Changes), weight: 25},
+		{name: "relations", text: relationsText(commit.Relations), weight: 35},
+		{name: "diff", text: commit.Diff, weight: 15},
 		{name: "author", text: commit.AuthorName + " " + commit.AuthorEmail, weight: 15},
 		{name: "hash", text: commit.Hash, weight: 5},
 	}
@@ -373,6 +447,7 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 	var score int
 
 	snippets := make([]Snippet, 0, maxSnippets)
+	matches := make([]MatchEvidence, 0)
 
 	for _, field := range fields {
 		normalizedText := normalize(field.text)
@@ -383,11 +458,23 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 		fieldScore := 0
 		if strings.Contains(normalizedText, normalizedQuery) {
 			fieldScore += field.weight * 2
+			matches = append(matches, MatchEvidence{
+				Field:  field.name,
+				Term:   originalQuery,
+				Text:   makeSnippet(field.text, originalQuery, terms),
+				Weight: field.weight * 2,
+			})
 		}
 
 		for _, term := range terms {
 			if strings.Contains(normalizedText, term) {
 				fieldScore += field.weight
+				matches = append(matches, MatchEvidence{
+					Field:  field.name,
+					Term:   term,
+					Text:   makeSnippet(field.text, term, []string{term}),
+					Weight: field.weight,
+				})
 			}
 		}
 
@@ -405,7 +492,7 @@ func scoreCommit(commit Commit, terms []string, normalizedQuery, originalQuery s
 		}
 	}
 
-	return score, snippets
+	return score, snippets, matches
 }
 
 type searchField struct {
@@ -487,5 +574,10 @@ func normalize(text string) string {
 
 func cloneCommit(commit Commit) Commit {
 	commit.Files = append([]string(nil), commit.Files...)
+	commit.Changes = append([]ChangedFile(nil), commit.Changes...)
+	commit.Relations.Reverts = append([]string(nil), commit.Relations.Reverts...)
+	commit.Relations.IssueRefs = append([]string(nil), commit.Relations.IssueRefs...)
+	commit.Relations.PRRefs = append([]string(nil), commit.Relations.PRRefs...)
+	commit.Refs = append([]string(nil), commit.Refs...)
 	return commit
 }
