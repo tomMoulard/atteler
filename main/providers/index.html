@@ -926,17 +926,63 @@ the macOS keychain or <code>~/.claude/.credentials.json</code>; the ChatGPT auth
 <code>claude-code</code> calls the Anthropic Messages API, and <code>codex</code> calls the ChatGPT
 Codex Responses backend. There is no subprocess, CLI tool sandbox, or workspace
 sandbox; atteler only forwards the tool definitions configured for the request.</p>
-<p>Disable the borrowed-credential adapters with <code>disable_private_adapter: true</code>
-(or the <code>ATTELER_DISABLE_*_ADAPTER</code> env vars) without disabling the normal
-providers. For the exact execution path, credential source, token-refresh
-behavior, endpoint, and health check of every provider, see the generated
-<strong>Provider runtime contracts</strong> and <strong>compatibility matrix</strong> in the
-<a href="https://github.com/tomMoulard/atteler#providers">project README</a>.</p>
+<p>Borrowed/local CLI credential stores are a trust boundary, not just a
+convenience fallback. By default Atteler only uses provider credentials supplied
+through environment variables. To let a provider read another CLI's credential
+store, configure the provider's <code>credential_policy</code> explicitly:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">providers</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">codex</span><span class="p">:</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="nt">credential_policy</span><span class="p">:</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">      </span><span class="nt">allowed_stores</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">codex_auth_json</span><span class="p p-Indicator">]</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">      </span><span class="nt">allow_borrowed_oauth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">      </span><span class="nt">allow_refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">      </span><span class="nt">allow_write_back</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="nt">claude-code</span><span class="p">:</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="nt">credential_policy</span><span class="p">:</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">      </span><span class="nt">allowed_stores</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">claude_code_keychain</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">claude_code_file</span><span class="p p-Indicator">]</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">      </span><span class="nt">allow_borrowed_oauth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">      </span><span class="nt">allow_refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">      </span><span class="nt">allow_write_back</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">  </span><span class="nt">anthropic</span><span class="p">:</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">    </span><span class="nt">credential_policy</span><span class="p">:</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">      </span><span class="nt">allowed_stores</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">env</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">forge_credentials</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">claude_code_keychain</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">claude_code_file</span><span class="p p-Indicator">]</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">      </span><span class="nt">allow_borrowed_oauth</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">      </span><span class="nt">allow_refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">      </span><span class="nt">allow_write_back</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</span></code></pre></div>
+<p><code>allowed_providers</code> can further narrow a policy to resolved provider names
+(for example <code>anthropic</code>, <code>codex</code>, or <code>openai</code>). External CLI ownership remains
+controlled by <code>allowed_stores</code> plus <code>allow_borrowed_oauth</code>. Omitting
+<code>allowed_stores</code> keeps env-only credentials available; <code>allowed_stores: []</code>
+intentionally denies every credential store.
+Refresh/write-back attempts, failures, and CAS-conflict events are recorded in
+<code>credential_events.jsonl</code> under <code>ATTELER_COMMAND_AUDIT_DIR</code> (or the default
+temporary audit directory), alongside the side-effect permission ledger, with
+source/store/provenance only and no token values.</p>
+<p>The same policy can be bootstrapped from environment variables when config
+files are not available:</p>
+<ul>
+<li><code>ATTELER_CREDENTIAL_ALLOWED_PROVIDERS</code></li>
+<li><code>ATTELER_CREDENTIAL_ALLOWED_STORES</code></li>
+<li><code>ATTELER_ALLOW_BORROWED_OAUTH</code></li>
+<li><code>ATTELER_ALLOW_CREDENTIAL_REFRESH</code></li>
+<li><code>ATTELER_ALLOW_CREDENTIAL_WRITE_BACK</code></li>
+<li><code>ATTELER_TRUST_BORROWED_CREDENTIALS</code> (broad opt-in: all stores plus
+  borrowed OAuth, refresh, and write-back)</li>
+</ul>
+<p>Disable the borrowed-credential adapters entirely with
+<code>disable_private_adapter: true</code> (or the <code>ATTELER_DISABLE_*_ADAPTER</code> env vars)
+without disabling the normal providers. For the exact execution path,
+credential source, token-refresh behavior, endpoint, and health check of every
+provider, see the generated <strong>Provider runtime contracts</strong> and <strong>compatibility
+matrix</strong> in the <a href="https://github.com/tomMoulard/atteler#providers">project README</a>.</p>
 <h2 id="authentication">Authentication<a class="headerlink" href="#authentication" title="Permanent link">&para;</a></h2>
 <p>Auth resolves in layers (<code>pkg/llm/auth.go</code> and the keychain helpers): environment
 variables, on-disk auth files (<code>~/.codex/auth.json</code>, ForgeCode credentials), and
-the macOS keychain. Anthropic is the only provider that actively refreshes Forge
-OAuth tokens.</p>
+the macOS keychain, but each non-env layer must be allowed by credential-source
+policy before it is read or refreshed. Environment variables remain explicit
+inputs, but borrowed OAuth values such as <code>CLAUDE_CODE_OAUTH_TOKEN</code> still require
+<code>allow_borrowed_oauth: true</code>.</p>
 
 
 
