@@ -114,3 +114,52 @@ func TestCredentialSourcePolicyExplicitEmptyListsDenyAll(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allowed_stores")
 }
+
+func TestCredentialSourcePolicyAllowedProvidersNormalizesHyphenatedNames(t *testing.T) {
+	t.Parallel()
+
+	source := credentialSource{
+		Provider: providerClaudeCode,
+		Store:    CredentialStoreClaudeCodeFile,
+	}
+
+	for _, allowedProvider := range []string{"claude-code", "claude_code"} {
+		t.Run(allowedProvider, func(t *testing.T) {
+			t.Parallel()
+
+			err := authorizeCredentialSourcePolicy(t.Context(), ProviderConfig{
+				CredentialPolicy: CredentialSourcePolicy{
+					AllowedProviders:    []string{allowedProvider},
+					AllowedProvidersSet: true,
+					AllowedStores:       []string{CredentialStoreClaudeCodeFile},
+					AllowedStoresSet:    true,
+				},
+			}, source, credentialActionRead)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestCredentialPolicySummaryPreservesExplicitEmptyLists(t *testing.T) {
+	t.Parallel()
+
+	summary := credentialPolicySummary(CredentialSourcePolicy{
+		Configured:          true,
+		AllowedProvidersSet: true,
+		AllowedStoresSet:    true,
+	})
+
+	assert.Contains(t, summary, "allowed_providers=[]")
+	assert.Contains(t, summary, "allowed_stores=[]")
+	assert.NotContains(t, summary, "allowed_providers=*")
+	assert.NotContains(t, summary, "allowed_stores=env")
+}
+
+func TestCredentialPolicySummaryDefaultsOnlyWhenListsUnset(t *testing.T) {
+	t.Parallel()
+
+	summary := credentialPolicySummary(CredentialSourcePolicy{})
+
+	assert.Contains(t, summary, "allowed_providers=*")
+	assert.Contains(t, summary, "allowed_stores=env")
+}

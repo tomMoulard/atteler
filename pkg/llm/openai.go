@@ -34,15 +34,16 @@ const (
 
 // OpenAIProvider calls the OpenAI Chat Completions API.
 type OpenAIProvider struct {
-	client         *http.Client
-	apiKey         string
-	providerName   string
-	authHeader     string
-	authScheme     string
-	chatPath       string
-	embeddingsPath string
-	modelsPath     string
-	apiVersion     string
+	client           *http.Client
+	apiKey           string
+	providerName     string
+	authHeader       string
+	authScheme       string
+	credentialSource credentialProvenance
+	chatPath         string
+	embeddingsPath   string
+	modelsPath       string
+	apiVersion       string
 	// baseURL can be rewritten at runtime when OpenAI reports a regional
 	// hostname mismatch (see applyRegionalHostnameCorrection); access it through
 	// currentBaseURL so reads and writes are serialized by mu.
@@ -80,7 +81,7 @@ func NewOpenAIProviderWithConfig(_ ProviderConfig) (*OpenAIProvider, error) {
 // ResolveOpenAIKeyContext and optional config values. OPENAI_BASE_URL overrides
 // cfg.BaseURL.
 func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OpenAIProvider, error) {
-	key, bearer, err := ResolveOpenAIKeyWithConfigContext(ctx, cfg)
+	key, source, err := resolveOpenAIKeyWithProvenanceContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -88,18 +89,31 @@ func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig)
 	baseURL := configuredBaseURL("OPENAI_BASE_URL", cfg.BaseURL, defaultOpenAIBase)
 
 	return &OpenAIProvider{
-		apiKey:         key,
-		bearer:         bearer,
-		baseURL:        baseURL,
-		providerName:   providerOpenAI,
-		authHeader:     "Authorization",
-		authScheme:     "Bearer",
-		chatPath:       defaultOpenAIChatPath,
-		embeddingsPath: defaultOpenAIEmbeddingsPath,
-		modelsPath:     defaultOpenAIModelsPath,
-		client:         providerHTTPClient(cfg),
-		local:          cfg.Local || isLocalEndpoint(baseURL),
+		apiKey:           key,
+		bearer:           false,
+		baseURL:          baseURL,
+		providerName:     providerOpenAI,
+		authHeader:       "Authorization",
+		authScheme:       "Bearer",
+		credentialSource: source,
+		chatPath:         defaultOpenAIChatPath,
+		embeddingsPath:   defaultOpenAIEmbeddingsPath,
+		modelsPath:       defaultOpenAIModelsPath,
+		client:           providerHTTPClient(cfg),
+		local:            cfg.Local || isLocalEndpoint(baseURL),
 	}, nil
+}
+
+// ProviderWarnings reports when the OpenAI adapter uses credentials borrowed
+// from another CLI's store instead of the process environment.
+func (o *OpenAIProvider) ProviderWarnings() []string {
+	if o == nil || o.providerName != providerOpenAI || o.credentialSource.Store != CredentialStoreCodexAuthJSON {
+		return nil
+	}
+
+	return []string{
+		"uses OpenAI API key from external credential source: " + o.credentialSource.detail(),
+	}
 }
 
 // NewOpenAICompatibleProviderWithConfigContext creates a provider for endpoints

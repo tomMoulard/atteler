@@ -945,6 +945,23 @@ func TestLoadCodexChatGPTAuth_RejectsMissingAccessToken(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing access_token")
 }
 
+func TestLoadCodexChatGPTAuth_MissingAccessTokenRedactsPathSecrets(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "api_key=path-secret")
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "auth.json"), []byte(`{
+		"auth_mode":"chatgpt",
+		"tokens":{"access_token":"","refresh_token":"refresh-secret"}
+	}`), 0o600))
+
+	_, err := loadCodexChatGPTAuthContext(permissiveCredentialContext(context.Background()), dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api_key=[REDACTED]")
+	assert.NotContains(t, err.Error(), "path-secret")
+	assert.NotContains(t, err.Error(), "refresh-secret")
+}
+
 func TestPersistRefreshedCodexAuth_AtomicAndPreservesUnknown(t *testing.T) {
 	t.Parallel()
 

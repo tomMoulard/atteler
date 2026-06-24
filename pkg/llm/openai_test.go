@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,60 @@ import (
 
 	"github.com/tommoulard/atteler/pkg/modelroute"
 )
+
+func TestOpenAIProvider_ProviderWarningsForCodexAuthJSONProvenance(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, (&OpenAIProvider{providerName: providerOpenAI}).ProviderWarnings())
+	assert.Empty(t, (&OpenAIProvider{
+		providerName: providerOpenAI,
+		credentialSource: credentialProvenance{
+			Provider: providerOpenAI,
+			Store:    CredentialStoreEnv,
+		},
+	}).ProviderWarnings())
+
+	warnings := (&OpenAIProvider{
+		providerName: providerOpenAI,
+		credentialSource: credentialProvenance{
+			Provider: providerOpenAI,
+			Store:    CredentialStoreCodexAuthJSON,
+			Location: "/tmp/api_key=secret-token/auth.json",
+		},
+	}).ProviderWarnings()
+
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "external credential source")
+	assert.Contains(t, warnings[0], CredentialStoreCodexAuthJSON)
+	assert.Contains(t, warnings[0], "api_key=[REDACTED]")
+	assert.NotContains(t, warnings[0], "secret-token")
+}
+
+func TestNewOpenAIProviderWithConfig_RecordsCodexAuthJSONProvenance(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	codexDir := filepath.Join(home, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0o750))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(codexDir, "auth.json"),
+		[]byte(`{"auth_mode":"api_key","OPENAI_API_KEY":"sk-from-codex-secret","tokens":{}}`),
+		0o600,
+	))
+
+	provider, err := NewOpenAIProviderWithConfigContext(t.Context(), ProviderConfig{
+		CredentialPolicy: CredentialSourcePolicy{AllowedStores: []string{CredentialStoreCodexAuthJSON}},
+	})
+	require.NoError(t, err)
+
+	warnings := provider.ProviderWarnings()
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], CredentialStoreCodexAuthJSON)
+	assert.Contains(t, warnings[0], "~/.codex/auth.json")
+	assert.NotContains(t, warnings[0], "sk-from-codex-secret")
+}
 
 func TestOpenAIProvider_Complete(t *testing.T) {
 	t.Parallel()

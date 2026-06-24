@@ -684,6 +684,49 @@ func TestPersistRefreshedClaudeCodeFile_PermissionPolicyDeniesWrite(t *testing.T
 	assert.Contains(t, string(auditData), "permission.write.deny")
 }
 
+func TestClaudeCodeAuthRefresh_AuditsPersisterIdentifierWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	refreshSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-access-audit",
+			"refresh_token": "new-refresh-audit",
+			"expires_in":    3600,
+		}))
+	}))
+	defer refreshSrv.Close()
+
+	auth := newClaudeCodeAuthFromBlock(claudeOAuthBlock{
+		AccessToken:  "old-access-audit",
+		RefreshToken: "old-refresh-audit",
+		ExpiresAt:    1,
+	}, &recordingClaudeCodePersister{
+		locationValue:   claudeCodeKeychainSource,
+		identifierValue: "keychain-account-audit",
+	})
+	auth.refreshURL = refreshSrv.URL
+	auth.httpClient = refreshSrv.Client()
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	require.NoError(t, auth.refresh(ctx, "old-access-audit"))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, "sha256:")
+	assert.NotContains(t, audit, "keychain-account-audit")
+	assert.NotContains(t, audit, "old-access-audit")
+	assert.NotContains(t, audit, "old-refresh-audit")
+	assert.NotContains(t, audit, "new-access-audit")
+	assert.NotContains(t, audit, "new-refresh-audit")
+}
+
 func TestClaudeCodeAuthRefresh_ConcurrentRefreshUsesCASWinner(t *testing.T) {
 	t.Parallel()
 
@@ -886,6 +929,19 @@ func TestNewClaudeCodeProviderWithConfig_HonorsPrivateAdapterEnvKillSwitchBefore
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type recordingClaudeCodePersister struct {
+	locationValue   string
+	identifierValue string
+}
+
+func (p *recordingClaudeCodePersister) persist(_ context.Context, _, _ string, _ int64) error {
+	return nil
+}
+
+func (p *recordingClaudeCodePersister) location() string { return p.locationValue }
+
+func (p *recordingClaudeCodePersister) identifier() string { return p.identifierValue }
 
 func newTestClaudeCodeAuth(t *testing.T, access, refresh string, expiresAtMs int64) *claudeCodeAuth {
 	t.Helper()

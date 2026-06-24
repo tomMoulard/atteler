@@ -103,6 +103,8 @@ type claudeCodeKeychainPersister struct {
 
 func (p *claudeCodeKeychainPersister) location() string { return claudeCodeKeychainSource }
 
+func (p *claudeCodeKeychainPersister) identifier() string { return p.account }
+
 func (p *claudeCodeKeychainPersister) persist(ctx context.Context, accessToken, refreshToken string, expiresAtMs int64) error {
 	current, err := readClaudeCodeKeychainPassword(ctx)
 	if err != nil {

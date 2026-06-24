@@ -195,7 +195,7 @@ health check, or model inventory with
 
 - Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API.
 - Credential source: `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` env vars by default; `CLAUDE_CODE_OAUTH_TOKEN` env var, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), and Claude Code keychain/`~/.claude/.credentials.json` only when credential policy allows borrowing those OAuth sessions.
-- Token refresh: ForgeCode OAuth credentials refresh during credential resolution only when `credential_policy.allow_refresh` and `allow_write_back` allow it; the Anthropic adapter itself does not refresh on 401.
+- Token refresh: ForgeCode OAuth credentials refresh during credential resolution only when `credential_policy.allow_refresh` and `allow_write_back` allow it; write-back is lock/CAS-guarded and audited. The Anthropic adapter itself does not refresh on 401.
 - Network endpoint: `ANTHROPIC_BASE_URL` or provider config, default `https://api.anthropic.com`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.
 - Sandbox and tools: No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep tool definitions in the Messages request; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
@@ -205,7 +205,7 @@ health check, or model inventory with
 
 - Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run the Claude Code CLI in print mode.
 - Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` only when `credential_policy.allowed_stores` and `allow_borrowed_oauth` allow borrowing that session.
-- Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store only when `credential_policy.allow_refresh` and `allow_write_back` allow it.
+- Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store only when `credential_policy.allow_refresh` and `allow_write_back` allow it; file write-back is atomic/CAS-guarded and refresh/write-back events are audited.
 - Network endpoint: `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`; `POST /v1/messages` for completions. Model listing is static for this provider.
 - Sandbox and tools: No Claude Code subprocess or Claude Code workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
@@ -215,7 +215,7 @@ health check, or model inventory with
 
 - Execution path: Direct HTTPS Responses request from atteler to the ChatGPT Codex backend; it does not run `codex exec`.
 - Credential source: `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens only when `credential_policy.allowed_stores` includes `codex_auth_json` and `allow_borrowed_oauth` is true.
-- Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json` only when `credential_policy.allow_refresh` and `allow_write_back` allow it.
+- Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json` only when `credential_policy.allow_refresh` and `allow_write_back` allow it; write-back is CAS-guarded and refresh/write-back events are audited.
 - Network endpoint: `CODEX_BASE_URL`, default `https://chatgpt.com/backend-api/codex`; `POST /responses` for completions. Model listing is static plus any model from Codex config.
 - Sandbox and tools: No Codex subprocess or Codex CLI workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep function-tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.

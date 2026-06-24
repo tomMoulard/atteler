@@ -55,9 +55,23 @@ providers:
 controlled by `allowed_stores` plus `allow_borrowed_oauth`. Omitting
 `allowed_stores` keeps env-only credentials available; `allowed_stores: []`
 intentionally denies every credential store.
-Refresh/write-back events are recorded in the credential audit ledger alongside
-the side-effect permission ledger, with source/store/provenance only and no
-token values. Disable the borrowed-credential adapters entirely with
+Refresh/write-back/CAS-conflict events are recorded in
+`credential_events.jsonl` under `ATTELER_COMMAND_AUDIT_DIR` (or the default
+temporary audit directory), alongside the side-effect permission ledger, with
+source/store/provenance only and no token values.
+
+The same policy can be bootstrapped from environment variables when config
+files are not available:
+
+- `ATTELER_CREDENTIAL_ALLOWED_PROVIDERS`
+- `ATTELER_CREDENTIAL_ALLOWED_STORES`
+- `ATTELER_ALLOW_BORROWED_OAUTH`
+- `ATTELER_ALLOW_CREDENTIAL_REFRESH`
+- `ATTELER_ALLOW_CREDENTIAL_WRITE_BACK`
+- `ATTELER_TRUST_BORROWED_CREDENTIALS` (broad opt-in: all stores plus
+  borrowed OAuth, refresh, and write-back)
+
+Disable the borrowed-credential adapters entirely with
 `disable_private_adapter: true` (or the `ATTELER_DISABLE_*_ADAPTER` env vars)
 without disabling the normal providers. For the exact execution path,
 credential source, token-refresh behavior, endpoint, and health check of every

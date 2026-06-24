@@ -372,7 +372,7 @@ func authorizeCredentialSourcePolicy(ctx context.Context, cfg ProviderConfig, so
 }
 
 func normalizeProviderName(provider string) string {
-	return strings.ToLower(strings.TrimSpace(provider))
+	return normalizeCredentialPolicyValue(provider)
 }
 
 type credentialProvenance struct {
@@ -555,15 +555,10 @@ func credentialPolicySummary(policy CredentialSourcePolicy) string {
 		policy = defaultCredentialSourcePolicy()
 	}
 
-	stores := policy.AllowedStores
-	if len(stores) == 0 {
-		stores = []string{CredentialStoreEnv}
-	}
-
 	return fmt.Sprintf(
 		"allowed_providers=%s allowed_stores=%s allow_borrowed_oauth=%t allow_refresh=%t allow_write_back=%t",
-		credentialPolicyListSummary(policy.AllowedProviders, "*"),
-		credentialPolicyListSummary(stores, CredentialStoreEnv),
+		credentialPolicyListSummary(policy.AllowedProviders, policy.AllowedProvidersSet, "*"),
+		credentialPolicyListSummary(policy.AllowedStores, policy.AllowedStoresSet, CredentialStoreEnv),
 		policy.AllowBorrowedOAuth,
 		policy.AllowRefresh,
 		policy.AllowWriteBack,
@@ -571,8 +566,12 @@ func credentialPolicySummary(policy CredentialSourcePolicy) string {
 }
 
 //nolint:wsl_v5 // Compact rendering avoids spreading simple summary formatting.
-func credentialPolicyListSummary(values []string, defaultValue string) string {
+func credentialPolicyListSummary(values []string, explicitlySet bool, defaultValue string) string {
 	if len(values) == 0 {
+		if explicitlySet {
+			return "[]"
+		}
+
 		return defaultValue
 	}
 
@@ -584,6 +583,10 @@ func credentialPolicyListSummary(values []string, defaultValue string) string {
 		}
 	}
 	if len(cleaned) == 0 {
+		if explicitlySet {
+			return "[]"
+		}
+
 		return defaultValue
 	}
 

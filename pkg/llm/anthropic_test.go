@@ -204,6 +204,43 @@ func TestAnthropicProvider_ProviderWarningsForBearerBetaRouting(t *testing.T) {
 	assert.Contains(t, warnings[0], "beta routing headers")
 	assert.Contains(t, warnings[0], "disable_private_adapter")
 	assert.Contains(t, warnings[0], "ATTELER_DISABLE_CLAUDE_CODE_ADAPTER")
+
+	warnings = (&AnthropicProvider{
+		bearer: true,
+		credentialSource: credentialProvenance{
+			Provider:      providerAnthropic,
+			Store:         CredentialStoreForgeCredentials,
+			Location:      "/tmp/api_key=secret-token/.credentials.json",
+			BorrowedOAuth: true,
+		},
+	}).ProviderWarnings()
+	require.Len(t, warnings, 2)
+	assert.Contains(t, warnings[0], "credential source:")
+	assert.Contains(t, warnings[0], CredentialStoreForgeCredentials)
+	assert.Contains(t, warnings[0], "borrowed_oauth=true")
+	assert.Contains(t, warnings[0], "api_key=[REDACTED]")
+	assert.NotContains(t, strings.Join(warnings, "\n"), "secret-token")
+}
+
+func TestNewAnthropicProviderWithConfig_RecordsBorrowedEnvProvenance(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-secret")
+	t.Setenv("FORGE_CONFIG", "")
+
+	provider, err := NewAnthropicProviderWithConfigContext(t.Context(), ProviderConfig{
+		CredentialPolicy: CredentialSourcePolicy{
+			AllowedStores:      []string{CredentialStoreEnv},
+			AllowBorrowedOAuth: true,
+		},
+	})
+	require.NoError(t, err)
+
+	warnings := provider.ProviderWarnings()
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "env:CLAUDE_CODE_OAUTH_TOKEN")
+	assert.Contains(t, warnings[0], "borrowed_oauth=true")
+	assert.NotContains(t, warnings[0], "oauth-secret")
 }
 
 func TestAnthropicProvider_HTTPError(t *testing.T) {
