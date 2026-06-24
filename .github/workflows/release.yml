@@ -40,6 +40,35 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Black-box CLI E2E
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          make e2e 2>&1 | tee artifacts/e2e.log
+
+      - name: Build GoReleaser snapshot
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish --parallelism=1
+
+      - name: Smoke GoReleaser snapshot artifact
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          .github/scripts/smoke-goreleaser-snapshot.sh dist 2>&1 | tee artifacts/release-smoke.log
+
+      - name: Upload release-gate failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-logs
+          path: |
+            artifacts/*.log
+            dist/**
+          if-no-files-found: ignore
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

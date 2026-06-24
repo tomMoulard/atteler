@@ -485,6 +485,78 @@ func TestCIWorkflowRunsIssueTemplateCheck(t *testing.T) {
 	assert.True(t, found, "CI should run the repository issue-template vocabulary check")
 }
 
+func TestReleaseGateWorkflowsRunBlackBoxE2EAndSnapshotSmoke(t *testing.T) {
+	t.Parallel()
+
+	root := repositoryRoot(t)
+	makefile := readTextFile(t, filepath.Join(root, "Makefile"))
+	ciContent := readTextFile(t, filepath.Join(root, ".github", "workflows", "ci.yml"))
+	assert.Contains(t, makefile, "ATTELER_E2E_LIVE= go test", "make e2e should keep live-provider tests out of release gates")
+	assert.Contains(t, ciContent, "pull_request:", "CI should run on pull requests, not only branch pushes")
+
+	for _, workflowName := range []string{"ci.yml", "release.yml"} {
+		workflowPath := filepath.Join(root, ".github", "workflows", workflowName)
+		wf := loadYAMLFile[workflow](t, workflowPath)
+		content := readTextFile(t, workflowPath)
+
+		assertWorkflowRunStep(t, wf, "Black-box CLI E2E", "make e2e")
+		assertWorkflowRunStep(t, wf, "Smoke GoReleaser snapshot artifact", ".github/scripts/smoke-goreleaser-snapshot.sh dist")
+		assertWorkflowTeeStepUsesPipefail(t, wf, "Black-box CLI E2E")
+		assertWorkflowTeeStepUsesPipefail(t, wf, "Smoke GoReleaser snapshot artifact")
+		assert.Contains(t, content, "actions/upload-artifact@v4", "%s should upload E2E/smoke logs on failure", workflowName)
+	}
+}
+
+func TestLiveE2EWorkflowDocumentsManualAndScheduledProviderPath(t *testing.T) {
+	t.Parallel()
+
+	root := repositoryRoot(t)
+	workflowPath := filepath.Join(root, ".github", "workflows", "e2e-live.yml")
+	wf := loadYAMLFile[workflow](t, workflowPath)
+	content := readTextFile(t, workflowPath)
+
+	assert.Contains(t, content, "workflow_dispatch:")
+	assert.Contains(t, content, "schedule:")
+	assert.Contains(t, content, `ATTELER_E2E_LIVE: "1"`)
+	assert.Contains(t, content, "secrets.OPENAI_API_KEY")
+	assert.Contains(t, content, "secrets.ANTHROPIC_API_KEY")
+	assertWorkflowRunStep(t, wf, "Live provider E2E", "make e2e-live")
+	assertWorkflowTeeStepUsesPipefail(t, wf, "Live provider E2E")
+}
+
+func assertWorkflowRunStep(t *testing.T, workflow workflow, name, command string) {
+	t.Helper()
+
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Name == name && strings.Contains(step.Run, command) {
+				return
+			}
+		}
+	}
+
+	assert.Failf(t, "missing workflow step", "workflow should include step %q running %q", name, command)
+}
+
+func assertWorkflowTeeStepUsesPipefail(t *testing.T, workflow workflow, name string) {
+	t.Helper()
+
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Name != name {
+				continue
+			}
+
+			assert.Contains(t, step.Run, "| tee ", "workflow step %q should capture logs with tee", name)
+			assert.Contains(t, step.Run, "set -o pipefail", "workflow step %q should fail when the command before tee fails", name)
+
+			return
+		}
+	}
+
+	assert.Failf(t, "missing workflow step", "workflow should include step %q", name)
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 

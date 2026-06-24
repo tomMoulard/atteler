@@ -1,0 +1,54 @@
+name: Live E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  live-e2e:
+    name: Live provider E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ATTELER_E2E_LIVE: "1"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ATTELER_E2E_FORGE_CONFIG: ${{ secrets.ATTELER_E2E_FORGE_CONFIG }}
+      ATTELER_E2E_OPENAI_MODEL: ${{ vars.ATTELER_E2E_OPENAI_MODEL }}
+      ATTELER_E2E_ANTHROPIC_MODEL: ${{ vars.ATTELER_E2E_ANTHROPIC_MODEL }}
+      ATTELER_E2E_FORGE_ANTHROPIC_MODEL: ${{ vars.ATTELER_E2E_FORGE_ANTHROPIC_MODEL }}
+      ATTELER_E2E_CLAUDE_CODE_MODEL: ${{ vars.ATTELER_E2E_CLAUDE_CODE_MODEL }}
+      ATTELER_E2E_CODEX_MODEL: ${{ vars.ATTELER_E2E_CODEX_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Live provider E2E
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          make e2e-live 2>&1 | tee artifacts/e2e-live.log
+
+      - name: Upload live E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-logs
+          path: artifacts/*.log
+          if-no-files-found: ignore

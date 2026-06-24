@@ -21,8 +21,9 @@ import (
 )
 
 var (
-	e2eBinary string
-	e2eTmpDir string
+	e2eBinary         string
+	e2eSymphonyBinary string
+	e2eTmpDir         string
 )
 
 const (
@@ -43,21 +44,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	e2eBinary = filepath.Join(e2eTmpDir, "atteler")
-	if runtime.GOOS == windowsGOOS {
-		e2eBinary += ".exe"
+	e2eBinary = binaryPath("atteler")
+	e2eSymphonyBinary = binaryPath("symphony")
+
+	if err := buildE2EBinary(root, e2eBinary, "./cmd/atteler"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+
+		_ = os.RemoveAll(e2eTmpDir)
+
+		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", e2eBinary, "./cmd/atteler")
-	cmd.Dir = root
-	cmd.Env = os.Environ()
-	output, err := cmd.CombinedOutput()
-
-	cancel()
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "build atteler: %v\n%s", err, output)
+	if err := buildE2EBinary(root, e2eSymphonyBinary, "./cmd/symphony"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 
 		_ = os.RemoveAll(e2eTmpDir)
 
@@ -68,6 +67,31 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(e2eTmpDir)
 
 	os.Exit(code)
+}
+
+func binaryPath(name string) string {
+	path := filepath.Join(e2eTmpDir, name)
+	if runtime.GOOS == windowsGOOS {
+		path += ".exe"
+	}
+
+	return path
+}
+
+func buildE2EBinary(root, outputPath, pkg string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", outputPath, pkg)
+	cmd.Dir = root
+	cmd.Env = os.Environ()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("build %s: %w\n%s", pkg, err, output)
+	}
+
+	return nil
 }
 
 func TestConfigCommands(t *testing.T) {
@@ -176,6 +200,47 @@ agent_loop:
 	result = runOK(t, runSpec{dir: workDir}, "--list-hook-events-json")
 	assertContains(t, result.stdout, `"type":"context_add"`)
 	assertContains(t, result.stdout, `"description":`)
+}
+
+func TestHeadlessSessionPersistence(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	replayPath := filepath.Join(workDir, "once.json")
+	writeFile(t, replayPath, `{"response":{"content":"persisted fixture","model":"replay/model"}}`)
+
+	runOK(t, runSpec{dir: workDir, sessionDir: sessionDir},
+		"--headless", "--replay-response", replayPath, "--once", "remember this run",
+	)
+
+	sessionID := onlySessionID(t, sessionDir)
+
+	result := runOK(t, runSpec{dir: workDir, sessionDir: sessionDir}, "session", "--session", sessionID, "messages")
+	assertContains(t, result.stdout, "remember this run")
+	assertContains(t, result.stdout, "persisted fixture")
+}
+
+func TestSymphonyBinaryBuildAndValidate(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	workflowPath := filepath.Join(workDir, "WORKFLOW.md")
+	writeFile(t, workflowPath, `---
+autonomy: medium
+tracker:
+  kind: github
+  repository: tomMoulard/atteler
+---
+Implement the issue safely.
+`)
+
+	result := runSymphonyOK(t, runSpec{dir: workDir, env: []string{"GITHUB_TOKEN=e2e-token"}},
+		"--validate", "--workflow", workflowPath, "--autonomy", "high",
+	)
+	assertContains(t, result.stdout, "Symphony workflow valid:")
+	assertContains(t, result.stdout, "tracker=github")
+	assertContains(t, result.stdout, "autonomy=high")
 }
 
 func TestGroupedCLIHelpAndRouting(t *testing.T) {
@@ -1810,6 +1875,42 @@ func runAtteler(t *testing.T, spec runSpec, args ...string) (runResult, error) {
 	return runResult{stdout: stdout.String(), stderr: stderr.String()}, err
 }
 
+func runSymphonyOK(t *testing.T, spec runSpec, args ...string) runResult {
+	t.Helper()
+
+	result, err := runSymphony(t, spec, args...)
+	if err != nil {
+		require.Failf(t, "unexpected failure", "symphony %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, result.stdout, result.stderr)
+	}
+
+	return result
+}
+
+func runSymphony(t *testing.T, spec runSpec, args ...string) (runResult, error) {
+	t.Helper()
+
+	timeout := spec.timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, e2eSymphonyBinary, args...)
+	cmd.Dir = spec.dir
+	cmd.Env = testEnv(t, spec)
+
+	var stdout, stderr bytes.Buffer
+
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	return runResult{stdout: stdout.String(), stderr: stderr.String()}, err
+}
+
 func runExpect(t *testing.T, expectPath, scriptPath string, spec runSpec) {
 	t.Helper()
 
@@ -2008,6 +2109,16 @@ func writeSession(t *testing.T, dir string) {
     {"role": "assistant", "content": "hi there"}
   ]
 }`, filepath.Dir(dir)))
+}
+
+func onlySessionID(t *testing.T, sessionDir string) string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(sessionDir, "*.json"))
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+
+	return strings.TrimSuffix(filepath.Base(matches[0]), ".json")
 }
 
 func writeFile(t *testing.T, path, content string) {

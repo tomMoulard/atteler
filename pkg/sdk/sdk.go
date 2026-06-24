@@ -130,6 +130,7 @@ var packageContracts = []PackageContract{
 	experimentalPackageContract("feedback", "agent-feedback proposal application helpers"),
 	experimentalPackageContract("githistory", "git-log parsing and lexical commit search"),
 	experimentalPackageContract("incident", "incident-analysis data structures and renderers"),
+	experimentalPackageContract("issuewatch", "local-first issue polling and implementation-run artifact assembly"),
 	experimentalPackageContract("lsp", "managed language-server lookups"),
 	experimentalPackageContract("mcp", "minimal Model Context Protocol request/response contracts"),
 	experimentalPackageContract("modelroute", "model routing catalogs, scoring, and telemetry"),
