@@ -792,7 +792,10 @@ func TestReadForgeCredentialsFile_WriteBackPolicyDeniesRefreshBeforeNetwork(t *t
 	]`
 	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
 
-	_, _, err := readForgeCredentialsFile(context.Background(), ProviderConfig{
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	_, _, err := readForgeCredentialsFile(ctx, ProviderConfig{
 		CredentialPolicy: CredentialSourcePolicy{
 			AllowedStores:      []string{CredentialStoreForgeCredentials},
 			AllowBorrowedOAuth: true,
@@ -803,6 +806,15 @@ func TestReadForgeCredentialsFile_WriteBackPolicyDeniesRefreshBeforeNetwork(t *t
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_write_back")
 	assert.NotContains(t, err.Error(), "old-refresh")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "allow_write_back")
+	assert.NotContains(t, audit, "old-refresh")
 }
 
 func TestRefreshForgeOAuthToken_HTTPErrorIsTyped(t *testing.T) {
@@ -834,6 +846,44 @@ func TestRefreshForgeOAuthToken_HTTPErrorIsTyped(t *testing.T) {
 	assert.Equal(t, "req-forge", providerErr.RequestID)
 	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
 	assert.Contains(t, providerErr.Message, "temporarily_unavailable")
+}
+
+func TestReadForgeCredentialsFile_RefreshFailureIsAudited(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-request-id", "req-forge-refresh")
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte(`{"error":{"message":"upstream token endpoint failed"}}`))
+		assert.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	data := `[
+		{"id":"claude_code","auth_details":{"o_auth":{
+			"config":{"token_url":"` + srv.URL + `","client_id":"client-123"},
+			"tokens":{"access_token":"expired","refresh_token":"old-refresh-secret","expires_at":"2000-01-01T00:00:00Z"}
+		}},"url_params":{"user_id":"forge-user-secret"}}
+	]`
+	require.NoError(t, os.WriteFile(path, []byte(data), 0o600))
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	_, _, err := readForgeCredentialsFile(ctx, ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()}, path)
+	require.Error(t, err)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "upstream token [REDACTED] failed")
+	assert.Contains(t, audit, "sha256:")
+	assert.NotContains(t, audit, "old-refresh-secret")
+	assert.NotContains(t, audit, "forge-user-secret")
 }
 
 func TestReadForgeCredentialsFile_CanceledRefreshDoesNotFallBackToAPIKey(t *testing.T) {
@@ -1062,11 +1112,14 @@ func TestCodexChatGPTAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
 		httpClient:       srv.Client(),
 		refreshURL:       srv.URL,
 		accessToken:      "old-access",
-		refreshToken:     "refresh-token",
+		refreshToken:     "refresh-token-secret",
 		credentialPolicy: permissiveCredentialSourcePolicy(),
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 
 	var providerErr *ProviderError
@@ -1076,6 +1129,15 @@ func TestCodexChatGPTAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
 	assert.Equal(t, "req-codex-refresh", providerErr.RequestID)
 	assert.Equal(t, RetryabilityRetryable, providerErr.Retryability)
 	assert.Equal(t, "rate limited", providerErr.Message)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "rate limited")
+	assert.NotContains(t, audit, "refresh-token-secret")
 }
 
 func TestCodexChatGPTAuthRefresh_CredentialPolicyDeniesRefreshBeforeNetwork(t *testing.T) {
@@ -1095,10 +1157,22 @@ func TestCodexChatGPTAuthRefresh_CredentialPolicyDeniesRefreshBeforeNetwork(t *t
 		},
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_refresh")
 	assert.NotContains(t, err.Error(), "refresh-token")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "allow_refresh")
+	assert.NotContains(t, audit, "refresh-token")
 }
 
 func TestCodexChatGPTAuthRefresh_CredentialPolicyDeniesWriteBackBeforeNetwork(t *testing.T) {
@@ -1118,10 +1192,55 @@ func TestCodexChatGPTAuthRefresh_CredentialPolicyDeniesWriteBackBeforeNetwork(t 
 		},
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_write_back")
 	assert.NotContains(t, err.Error(), "refresh-token")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "allow_write_back")
+	assert.NotContains(t, audit, "refresh-token")
+}
+
+func TestCodexChatGPTAuthRefresh_PermissionDenialIsAudited(t *testing.T) {
+	t.Parallel()
+
+	auth := &codexChatGPTAuth{
+		authPath:         filepath.Join(t.TempDir(), "auth.json"),
+		httpClient:       http.DefaultClient,
+		refreshURL:       "http://127.0.0.1:1/token",
+		accessToken:      "old-access",
+		refreshToken:     "refresh-token-secret",
+		credentialPolicy: permissiveCredentialSourcePolicy(),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := auth.refresh(ctx, "old-access")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "permission.network.deny")
+	assert.NotContains(t, audit, "refresh-token-secret")
 }
 
 func TestResolveOpenAIKey_NoCreds(t *testing.T) {
@@ -1151,11 +1270,14 @@ func TestClaudeCodeAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
 		httpClient:       srv.Client(),
 		refreshURL:       srv.URL,
 		accessToken:      "old-access",
-		refreshToken:     "refresh-token",
+		refreshToken:     "refresh-token-secret",
 		credentialPolicy: permissiveCredentialSourcePolicy(),
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 
 	var providerErr *ProviderError
@@ -1165,6 +1287,15 @@ func TestClaudeCodeAuthRefresh_HTTPErrorIsTyped(t *testing.T) {
 	assert.Equal(t, "req-claude-refresh", providerErr.RequestID)
 	assert.Equal(t, RetryabilityNonRetryable, providerErr.Retryability)
 	assert.Contains(t, providerErr.Message, "invalid_grant")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "invalid_grant")
+	assert.NotContains(t, audit, "refresh-token-secret")
 }
 
 func TestClaudeCodeAuthRefresh_CredentialPolicyDeniesRefreshBeforeNetwork(t *testing.T) {
@@ -1183,10 +1314,22 @@ func TestClaudeCodeAuthRefresh_CredentialPolicyDeniesRefreshBeforeNetwork(t *tes
 		},
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_refresh")
 	assert.NotContains(t, err.Error(), "refresh-token")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "allow_refresh")
+	assert.NotContains(t, audit, "refresh-token")
 }
 
 func TestClaudeCodeAuthRefresh_CredentialPolicyDeniesWriteBackBeforeNetwork(t *testing.T) {
@@ -1205,8 +1348,52 @@ func TestClaudeCodeAuthRefresh_CredentialPolicyDeniesWriteBackBeforeNetwork(t *t
 		},
 	}
 
-	err := auth.refresh(context.Background(), "old-access")
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+
+	err := auth.refresh(ctx, "old-access")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "allow_write_back")
 	assert.NotContains(t, err.Error(), "refresh-token")
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "allow_write_back")
+	assert.NotContains(t, audit, "refresh-token")
+}
+
+func TestClaudeCodeAuthRefresh_PermissionDenialIsAudited(t *testing.T) {
+	t.Parallel()
+
+	auth := &claudeCodeAuth{
+		httpClient:       http.DefaultClient,
+		refreshURL:       "http://127.0.0.1:1/token",
+		accessToken:      "old-access",
+		refreshToken:     "refresh-token-secret",
+		credentialPolicy: permissiveCredentialSourcePolicy(),
+	}
+
+	policy := permission.DefaultPolicy()
+	policy.SetMode(permission.OperationNetwork, permission.ModeDeny)
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithPolicy(context.Background(), &policy)
+	ctx = permission.ContextWithAuditDir(ctx, auditDir)
+
+	err := auth.refresh(ctx, "old-access")
+	require.Error(t, err)
+	require.True(t, permission.ErrDenied(err))
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventRefresh)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "permission.network.deny")
+	assert.NotContains(t, audit, "refresh-token-secret")
 }

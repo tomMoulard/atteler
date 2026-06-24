@@ -316,6 +316,9 @@ resolved provider name for the policy (for example `anthropic`, `codex`, or
 `allow_borrowed_oauth: true` even when they arrive via the `env` store, such as
 `CLAUDE_CODE_OAUTH_TOKEN`. Omitting `allowed_stores` keeps the default
 env-only behavior; setting `allowed_stores: []` is an explicit deny-all.
+Refresh/write-back attempts, failures, and CAS-conflict decisions are written to
+`credential_events.jsonl` under `ATTELER_COMMAND_AUDIT_DIR` (or the default
+temporary audit directory) with redacted locations and hashed identifiers.
 
 #### `chat_completions_path`
 

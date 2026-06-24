@@ -628,15 +628,21 @@ func refreshForgeClaudeCodeCredential(ctx context.Context, cfg ProviderConfig, p
 	source.Identifier = forgeCredentialEntryIdentifier(*entry)
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return "", err
 	}
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return "", err
 	}
 
 	tokens, err := refreshForgeOAuthToken(ctx, oauth.Config, oauth.Tokens.refreshToken())
 	if err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return "", err
 	}
 
@@ -760,6 +766,8 @@ func writeRefreshedForgeCredentials(
 	source.Identifier = identifier
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -771,12 +779,14 @@ func writeRefreshedForgeCredentials(
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
 	expectedDigest := digestCredentialFile(data)
 
-	return withCredentialFileLock(path, func() error {
+	err := withCredentialFileLock(path, func() error {
 		if err := requireCredentialContext(ctx); err != nil {
 			return err
 		}
@@ -830,6 +840,11 @@ func writeRefreshedForgeCredentials(
 
 		return nil
 	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
+	}
+
+	return err
 }
 
 func refreshedForgeCredentialsJSON(data []byte, tokens forgeOAuthTokens) ([]byte, error) {
@@ -1237,10 +1252,14 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 	source := a.credentialSource()
 	cfg := ProviderConfig{CredentialPolicy: a.credentialPolicy}
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return err
 	}
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -1253,6 +1272,8 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialRefreshFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
@@ -1275,17 +1296,26 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("codex chatgpt refresh: %w", err)
+		err = fmt.Errorf("codex chatgpt refresh: %w", err)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxOAuthErrorBodyBytes))
 	if err != nil {
-		return fmt.Errorf("codex chatgpt refresh: read response: %w", err)
+		err = fmt.Errorf("codex chatgpt refresh: read response: %w", err)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("codex chatgpt refresh: %w", newProviderHTTPError(providerCodex, resp, respBody))
+		err = fmt.Errorf("codex chatgpt refresh: %w", newProviderHTTPError(providerCodex, resp, respBody))
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	var refreshed struct {
@@ -1294,11 +1324,17 @@ func (a *codexChatGPTAuth) refresh(ctx context.Context, observedAccess string) e
 		RefreshToken string `json:"refresh_token"`
 	}
 	if decodeErr := json.Unmarshal(respBody, &refreshed); decodeErr != nil {
-		return fmt.Errorf("codex chatgpt refresh: decode response: %w", decodeErr)
+		err = fmt.Errorf("codex chatgpt refresh: decode response: %w", decodeErr)
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	if refreshed.AccessToken == "" {
-		return errors.New("codex chatgpt refresh: response missing access_token")
+		err = errors.New("codex chatgpt refresh: response missing access_token")
+		auditCredentialRefreshFailure(ctx, source, err)
+
+		return err
 	}
 
 	if ctxErr := requireCredentialContext(ctx); ctxErr != nil {
@@ -1406,6 +1442,8 @@ func persistRefreshedCodexAuthWithCAS(
 	}
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return codexAuthState{}, err
 	}
 
@@ -1417,6 +1455,8 @@ func persistRefreshedCodexAuthWithCAS(
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
 		return codexAuthState{}, policyErr
 	}
 
@@ -1485,6 +1525,9 @@ func persistRefreshedCodexAuthWithCAS(
 
 		return nil
 	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
+	}
 
 	return state, err
 }
@@ -1924,10 +1967,14 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 	source := a.credentialSource()
 	cfg := ProviderConfig{CredentialPolicy: a.credentialPolicy}
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionRefresh); err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return err
 	}
 
 	if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+		auditCredentialWriteBackFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -1940,11 +1987,15 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialRefreshFailure(ctx, source, policyErr)
+
 		return policyErr
 	}
 
 	refreshed, err := a.exchangeClaudeCodeRefreshToken(ctx)
 	if err != nil {
+		auditCredentialRefreshFailure(ctx, source, err)
+
 		return err
 	}
 
@@ -1995,10 +2046,14 @@ func (a *claudeCodeAuth) refresh(ctx context.Context, observedAccess string) err
 		accessToken, refreshToken, expiresAt = state.AccessToken, state.RefreshToken, state.ExpiresAt
 	} else {
 		if err := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); err != nil {
+			auditCredentialWriteBackFailure(ctx, source, err)
+
 			return err
 		}
 
 		if err := a.persist.persist(ctx, accessToken, refreshToken, expiresAt); err != nil {
+			auditCredentialWriteBackFailure(ctx, source, err)
+
 			return err
 		}
 
@@ -2137,7 +2192,7 @@ func (p *claudeCodeFilePersister) persist(ctx context.Context, accessToken, refr
 	return err
 }
 
-//nolint:wsl_v5 // CAS/write-back sequence is clearer as one guarded critical section.
+//nolint:gocognit,wsl_v5 // CAS/write-back sequence is clearer as one guarded critical section.
 func (p *claudeCodeFilePersister) persistCAS(
 	ctx context.Context,
 	expectedAccessToken, expectedRefreshToken, accessToken, refreshToken string,
@@ -2150,6 +2205,8 @@ func (p *claudeCodeFilePersister) persistCAS(
 	}
 
 	if sourceErr := authorizeCredentialSourcePolicy(ctx, cfg, source, credentialActionWriteBack); sourceErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, sourceErr)
+
 		return claudeCodePersistState{}, sourceErr
 	}
 
@@ -2161,6 +2218,8 @@ func (p *claudeCodeFilePersister) persistCAS(
 		permission.OperationWrite,
 		permission.OperationCredentialAccess,
 	); policyErr != nil {
+		auditCredentialWriteBackFailure(ctx, source, policyErr)
+
 		return claudeCodePersistState{}, policyErr
 	}
 
@@ -2230,6 +2289,9 @@ func (p *claudeCodeFilePersister) persistCAS(
 
 		return nil
 	})
+	if err != nil && !isCredentialFileCASMismatch(err) {
+		auditCredentialWriteBackFailure(ctx, source, err)
+	}
 
 	return state, err
 }

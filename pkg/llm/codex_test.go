@@ -1047,6 +1047,17 @@ func TestPersistRefreshedCodexAuth_PermissionPolicyDeniesWrite(t *testing.T) {
 	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
 	require.NoError(t, readErr)
 	assert.Contains(t, string(auditData), "permission.write.deny")
+
+	credentialAuditData, credentialAuditErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, credentialAuditErr)
+
+	credentialAudit := string(credentialAuditData)
+	assert.Contains(t, credentialAudit, credentialAuditEventWriteBack)
+	assert.Contains(t, credentialAudit, `"decision":"failed"`)
+	assert.Contains(t, credentialAudit, "permission.write.deny")
+	assert.NotContains(t, credentialAudit, "new-access")
+	assert.NotContains(t, credentialAudit, "new-refresh")
+	assert.NotContains(t, credentialAudit, "new-id")
 }
 
 func TestPersistRefreshedCodexAuth_AuditsWriteBackWithoutSecrets(t *testing.T) {
@@ -1092,6 +1103,56 @@ func TestPersistRefreshedCodexAuth_AuditsWriteBackWithoutSecrets(t *testing.T) {
 	assert.NotContains(t, audit, "new-id-secret")
 	assert.NotContains(t, audit, "account-secret-123456")
 	assert.Contains(t, audit, "sha256:")
+}
+
+func TestPersistRefreshedCodexAuth_WriteBackFailureIsAudited(t *testing.T) {
+	t.Parallel()
+
+	authDir := filepath.Join(t.TempDir(), "api_key=path-secret")
+	require.NoError(t, os.MkdirAll(authDir, 0o700))
+
+	authPath := filepath.Join(authDir, "auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens":`), 0o600))
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      authPath,
+		Identifier:    "acct-secret",
+		BorrowedOAuth: true,
+	}
+
+	_, err := persistRefreshedCodexAuthWithCAS(
+		ctx,
+		authPath,
+		"old-access-secret",
+		"old-refresh-secret",
+		"new-access-secret",
+		"new-refresh-secret",
+		"new-id-secret",
+		source,
+		ProviderConfig{CredentialPolicy: permissiveCredentialSourcePolicy()},
+	)
+	require.Error(t, err)
+
+	auditData, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	audit := string(auditData)
+	assert.Contains(t, audit, credentialAuditEventWriteBack)
+	assert.Contains(t, audit, `"decision":"failed"`)
+	assert.Contains(t, audit, "api_key=[REDACTED]")
+	assert.Contains(t, audit, "sha256:")
+	assert.NotContains(t, audit, "path-secret")
+	assert.NotContains(t, audit, "acct-secret")
+	assert.NotContains(t, audit, "old-access-secret")
+	assert.NotContains(t, audit, "old-refresh-secret")
+	assert.NotContains(t, audit, "new-access-secret")
+	assert.NotContains(t, audit, "new-refresh-secret")
+	assert.NotContains(t, audit, "new-id-secret")
 }
 
 func TestPersistRefreshedCodexAuth_CASPreventsStaleWriteBack(t *testing.T) {

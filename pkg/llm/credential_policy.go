@@ -513,6 +513,7 @@ func auditCredentialEvent(ctx context.Context, event credentialAuditEvent) {
 	event.Store = normalizeCredentialPolicyValue(event.Store)
 	event.Location = redactCredentialLocation(event.Location)
 	event.Identifier = redactCredentialIdentifier(event.Identifier)
+	event.Reason = RedactDiagnosticMessage(event.Reason)
 
 	line, err := json.Marshal(event)
 	if err != nil {
@@ -536,6 +537,44 @@ func auditCredentialEvent(ctx context.Context, event credentialAuditEvent) {
 	if _, err := file.Write(append(line, '\n')); err != nil {
 		return
 	}
+}
+
+func auditCredentialRefreshFailure(ctx context.Context, source credentialSource, err error) {
+	if err == nil {
+		return
+	}
+
+	auditCredentialEvent(ctx, credentialAuditEvent{
+		Event:         credentialAuditEventRefresh,
+		Provider:      source.Provider,
+		Store:         source.Store,
+		Action:        credentialActionRefresh,
+		Source:        source.Description,
+		Location:      source.Location,
+		Identifier:    source.Identifier,
+		BorrowedOAuth: source.BorrowedOAuth,
+		Decision:      "failed",
+		Reason:        err.Error(),
+	})
+}
+
+func auditCredentialWriteBackFailure(ctx context.Context, source credentialSource, err error) {
+	if err == nil {
+		return
+	}
+
+	auditCredentialEvent(ctx, credentialAuditEvent{
+		Event:         credentialAuditEventWriteBack,
+		Provider:      source.Provider,
+		Store:         source.Store,
+		Action:        credentialActionWriteBack,
+		Source:        source.Description,
+		Location:      source.Location,
+		Identifier:    source.Identifier,
+		BorrowedOAuth: source.BorrowedOAuth,
+		Decision:      "failed",
+		Reason:        err.Error(),
+	})
 }
 
 func credentialAuditDir(ctx context.Context) string {

@@ -682,6 +682,16 @@ func TestPersistRefreshedClaudeCodeFile_PermissionPolicyDeniesWrite(t *testing.T
 	auditData, readErr := os.ReadFile(filepath.Join(auditDir, "side_effects.jsonl"))
 	require.NoError(t, readErr)
 	assert.Contains(t, string(auditData), "permission.write.deny")
+
+	credentialAuditData, credentialAuditErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, credentialAuditErr)
+
+	credentialAudit := string(credentialAuditData)
+	assert.Contains(t, credentialAudit, credentialAuditEventWriteBack)
+	assert.Contains(t, credentialAudit, `"decision":"failed"`)
+	assert.Contains(t, credentialAudit, "permission.write.deny")
+	assert.NotContains(t, credentialAudit, "new-access")
+	assert.NotContains(t, credentialAudit, "new-refresh")
 }
 
 func TestClaudeCodeAuthRefresh_AuditsPersisterIdentifierWithoutSecrets(t *testing.T) {

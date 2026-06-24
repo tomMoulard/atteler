@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,6 +38,38 @@ func TestCredentialSourcePolicyErrorRedactsSecretLocationAndAudit(t *testing.T) 
 	assert.NotContains(t, string(audit), "super-secret-token")
 	assert.Contains(t, string(audit), "sha256:")
 	assert.NotContains(t, string(audit), "acct")
+}
+
+func TestCredentialAuditFailureReasonRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	auditDir := t.TempDir()
+	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	source := credentialSource{
+		Provider:      providerCodex,
+		Store:         CredentialStoreCodexAuthJSON,
+		Description:   "Codex ChatGPT auth.json",
+		Location:      filepath.Join(t.TempDir(), "auth.json"),
+		Identifier:    "acct-secret",
+		BorrowedOAuth: true,
+	}
+
+	auditCredentialRefreshFailure(ctx, source, errors.New("refresh failed: refresh_token=refresh-secret Authorization: Bearer access-secret"))
+	auditCredentialWriteBackFailure(ctx, source, errors.New("write failed: access_token=access-secret"))
+
+	audit, readErr := os.ReadFile(filepath.Join(auditDir, credentialAuditLedgerFileName))
+	require.NoError(t, readErr)
+
+	body := string(audit)
+	assert.Contains(t, body, credentialAuditEventRefresh)
+	assert.Contains(t, body, credentialAuditEventWriteBack)
+	assert.Contains(t, body, "refresh_token=[REDACTED]")
+	assert.Contains(t, body, "Authorization: [REDACTED]")
+	assert.Contains(t, body, "access_token=[REDACTED]")
+	assert.Contains(t, body, "sha256:")
+	assert.NotContains(t, body, "refresh-secret")
+	assert.NotContains(t, body, "access-secret")
+	assert.NotContains(t, body, "acct-secret")
 }
 
 func TestRedactCredentialPathErrorRedactsPathErrorLocation(t *testing.T) {

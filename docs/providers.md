@@ -55,7 +55,7 @@ providers:
 controlled by `allowed_stores` plus `allow_borrowed_oauth`. Omitting
 `allowed_stores` keeps env-only credentials available; `allowed_stores: []`
 intentionally denies every credential store.
-Refresh/write-back/CAS-conflict events are recorded in
+Refresh/write-back attempts, failures, and CAS-conflict events are recorded in
 `credential_events.jsonl` under `ATTELER_COMMAND_AUDIT_DIR` (or the default
 temporary audit directory), alongside the side-effect permission ledger, with
 source/store/provenance only and no token values.
