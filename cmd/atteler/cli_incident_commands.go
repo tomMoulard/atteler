@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	"github.com/tommoulard/atteler/pkg/githistory"
 	"github.com/tommoulard/atteler/pkg/incident"
 	"github.com/tommoulard/atteler/pkg/mcp"
@@ -968,7 +969,7 @@ func mcpArrayIncidentPayload(raw json.RawMessage, reference string, items json.R
 }
 
 func incidentRecentChanges(ctx context.Context, cwd string, inc incident.Context) (changes []incident.Change, warnings []string) {
-	logText, err := gitHistoryLogWithOptions(ctx, cwd, gitHistoryLogOptions{
+	commits, err := gitHistoryCommits(ctx, cwd, autonomy.Medium, gitHistoryCollectOptions{
 		Audit: attshell.AuditContext{
 			Caller:          "atteler.incident.git_history",
 			IssueID:         incident.RedactIdentifier(inc.Reference),
@@ -977,11 +978,6 @@ func incidentRecentChanges(ctx context.Context, cwd string, inc incident.Context
 		RedactOutput: incident.RedactText,
 		OutputNote:   "incident git history output redacted before audit capture",
 	})
-	if err != nil {
-		return nil, []string{"git history correlation unavailable: " + incident.RedactText(err.Error())}
-	}
-
-	commits, err := githistory.ParseLog(logText)
 	if err != nil {
 		return nil, []string{"git history correlation unavailable: " + incident.RedactText(err.Error())}
 	}

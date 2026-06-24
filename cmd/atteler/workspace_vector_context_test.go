@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tommoulard/atteler/pkg/autonomy"
 	appconfig "github.com/tommoulard/atteler/pkg/config"
 	"github.com/tommoulard/atteler/pkg/retrieval"
 	"github.com/tommoulard/atteler/pkg/vector"
@@ -859,6 +860,48 @@ func TestRetrievalSearchersAllWithExplicitAgentMemoryAgentReportsUnavailable(t *
 	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "agent memory: load store")
+}
+
+func TestRetrievalSearcherGitHistoryUsesSemanticCollectorFilters(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o750))
+
+	argsPath := filepath.Join(root, "git-args.txt")
+	fakeGitPath := filepath.Join(binDir, "git")
+	fakeGit := `#!/bin/sh
+printf '%s\n' "$@" > "$ATTELER_FAKE_GIT_ARGS"
+if [ "$1" = "log" ]; then
+  printf 'abc123def456\037Ada\037ada@example.com\0372026-04-02T12:00:00Z\037Touch history\037\037main\036\n1\t0\tpkg/githistory/history.go\n'
+  exit 0
+fi
+exit 1
+`
+	require.NoError(t, os.WriteFile(fakeGitPath, []byte(fakeGit), 0o700)) //nolint:gosec // executable fake git is scoped to t.TempDir.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ATTELER_FAKE_GIT_ARGS", argsPath)
+
+	searcher, err := retrievalSearcher(context.Background(), appState{cwd: root, autonomy: autonomy.Medium}, retrievalCommandInput{
+		GitHistory: gitHistorySearchCommandInput{
+			Paths:       []string{"pkg/githistory"},
+			Authors:     []string{"Ada"},
+			Since:       "2026-04-01",
+			NoMerges:    true,
+			FirstParent: true,
+		},
+	}, retrieval.SourceGitHistory)
+	require.NoError(t, err)
+	require.NotNil(t, searcher)
+
+	argsData, err := os.ReadFile(argsPath)
+	require.NoError(t, err)
+
+	args := string(argsData)
+	assert.Contains(t, args, "--since=2026-04-01T00:00:00Z")
+	assert.Contains(t, args, "--author=Ada")
+	assert.Contains(t, args, "--first-parent")
+	assert.Contains(t, args, "--no-merges")
+	assert.Contains(t, args, "--\npkg/githistory")
 }
 
 func TestRetrievalSearchersExplicitGitHistoryReportsUnavailable(t *testing.T) {

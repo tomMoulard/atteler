@@ -276,12 +276,12 @@ func commandContractsByName() map[string]commandContract {
 			withExamples("atteler agents feedback-rollback agents.yaml --feedback-rollback-agent reviewer --feedback-rollback-id fg-1"),
 		),
 		"git-history-search-providerless": commandContractFor(
-			"search local git history subjects, files, and authors",
-			[]string{"--git-history-search", "--git-history-limit"},
+			"search local git history with git-native metadata, files, and changed-file evidence",
+			gitHistorySearchInputFlags(),
 			[]string{commandEffectGitRead, commandEffectUserOutput},
 			[]string{commandOutputText},
 			withInputType("gitHistorySearchCommandInput"),
-			withExamples(`atteler memory git-history "memory regression"`),
+			withExamples(`atteler memory git-history "memory regression" --git-history-path pkg/memory --git-history-range v1.0..HEAD`),
 		),
 		"incident-diagnose-providerless": commandContractFor(
 			"diagnose a production incident from Sentry, MCP, or redacted JSON without starting the repair agent loop",
@@ -779,6 +779,8 @@ func commandContractsByName() map[string]commandContract {
 }
 
 func retrievalSearchInputFlags() []string {
+	flags := append(vectorRuntimeInputFlags(), gitHistorySearchFilterFlags()...)
+
 	return append([]string{
 		"--retrieval-search",
 		"--retrieval-source",
@@ -795,7 +797,31 @@ func retrievalSearchInputFlags() []string {
 		"--agent-memory-store",
 		"--agent-memory-agent",
 		"--agent",
-	}, vectorRuntimeInputFlags()...)
+	}, flags...)
+}
+
+func gitHistorySearchInputFlags() []string {
+	return append([]string{
+		"--git-history-search",
+		"--git-history-limit",
+	}, gitHistorySearchFilterFlags()...)
+}
+
+func gitHistorySearchFilterFlags() []string {
+	return []string{
+		"--git-history-hunks",
+		"--git-history-max-hunk-bytes",
+		"--git-history-range",
+		"--git-history-ref",
+		"--git-history-path",
+		"--git-history-author",
+		"--git-history-since",
+		"--git-history-until",
+		"--git-history-all",
+		"--git-history-first-parent",
+		"--git-history-no-merges",
+		"--git-history-merges",
+	}
 }
 
 func vectorSearchInputFlags() []string {

@@ -212,3 +212,29 @@ func TestSourcePolicyFlagsAllowedForRetrievalSearch(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--retrieval-search")
 }
+
+func TestRetrievalCommandInputFromOptionsCarriesGitHistoryFilters(t *testing.T) {
+	t.Parallel()
+
+	input := retrievalCommandInputFromOptions(cliOptions{
+		retrievalSearch:       "rename collector",
+		gitHistoryRange:       "v1..HEAD",
+		gitHistoryRefs:        stringListFlag{"main"},
+		gitHistoryPaths:       stringListFlag{"pkg/githistory"},
+		gitHistoryAuthors:     stringListFlag{"Ada"},
+		gitHistorySince:       "2026-04-01",
+		gitHistoryUntil:       "2026-04-30",
+		gitHistoryNoMerges:    true,
+		gitHistoryFirstParent: true,
+	})
+
+	assert.Equal(t, "rename collector", input.Search)
+	assert.Equal(t, "v1..HEAD", input.GitHistory.Range)
+	assert.Equal(t, []string{"main"}, input.GitHistory.Refs)
+	assert.Equal(t, []string{"pkg/githistory"}, input.GitHistory.Paths)
+	assert.Equal(t, []string{"Ada"}, input.GitHistory.Authors)
+	assert.Equal(t, "2026-04-01", input.GitHistory.Since)
+	assert.Equal(t, "2026-04-30", input.GitHistory.Until)
+	assert.True(t, input.GitHistory.NoMerges)
+	assert.True(t, input.GitHistory.FirstParent)
+}

@@ -1,3 +1,4 @@
+//nolint:wsl_v5 // Command flow keeps related render/format branches close for readability.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1347,27 +1349,26 @@ func formatWatchFinding(finding watch.Finding) string {
 	return strings.Join(parts, "\t")
 }
 
-func runGitHistorySearch(ctx context.Context, root, query string, limit int, level autonomy.Level) error {
-	level = autonomy.Normalize(level)
-	if level == autonomy.Low {
-		return errors.New("git history: autonomy low is advisory-only and blocks git history shell execution; rerun with --autonomy medium or higher")
+func runGitHistorySearch(ctx context.Context, root string, input gitHistorySearchCommandInput, level autonomy.Level) error {
+	if input.Limit == 0 {
+		input.Limit = 5
 	}
 
-	if limit == 0 {
-		limit = 5
-	}
-
-	logText, err := gitHistoryLog(ctx, root, level)
+	query, err := gitHistoryQuery(input)
 	if err != nil {
 		return err
 	}
 
-	commits, err := githistory.ParseLog(logText)
+	commits, err := gitHistoryCommits(ctx, root, level, gitHistoryCollectOptions{
+		Query:        query,
+		IncludeHunks: input.IncludeHunks,
+		MaxHunkBytes: input.MaxHunkBytes,
+	})
 	if err != nil {
-		return fmt.Errorf("git history: parse log: %w", err)
+		return err
 	}
 
-	results := githistory.NewIndex(commits).Search(query, limit)
+	results := githistory.NewIndex(commits).Search(input.Query, input.Limit)
 	if len(results) == 0 {
 		fmt.Println("No git history results found.")
 		return nil
@@ -1380,65 +1381,94 @@ func runGitHistorySearch(ctx context.Context, root, query string, limit int, lev
 	return nil
 }
 
-func gitHistoryLog(ctx context.Context, root string, level autonomy.Level) (string, error) {
-	return gitHistoryLogWithOptions(ctx, root, gitHistoryLogOptions{
-		Audit: gitHistoryAuditContext(level),
-	})
-}
-
-type gitHistoryLogOptions struct {
+//nolint:govet // Field order follows collector option grouping.
+type gitHistoryCollectOptions struct {
+	Query        githistory.Query
 	Audit        shell.AuditContext
+	MaxHunkBytes int
+	IncludeHunks bool
 	RedactOutput func(string) string
 	OutputNote   string
 }
 
-func gitHistoryLogWithOptions(ctx context.Context, root string, opts gitHistoryLogOptions) (string, error) {
-	var stdout, stderr bytes.Buffer
-
-	args := []string{"log", "--name-only", "--date=iso-strict", "--pretty=format:%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1e", "--"}
-	audit := opts.Audit
-
-	if strings.TrimSpace(audit.Caller) == "" {
-		audit.Caller = "atteler.git_history"
+func gitHistoryQuery(input gitHistorySearchCommandInput) (githistory.Query, error) {
+	if input.NoMerges && input.MergesOnly {
+		return githistory.Query{}, errors.New("git-history-no-merges and git-history-merges cannot both be set")
 	}
 
-	cmd, invocation, err := shell.CommandContext(ctx, shell.CommandOptions{
-		Program: "git",
-		Args:    args,
-		Dir:     root,
-		Stdout:  &stdout,
-		Stderr:  &stderr,
-		Mode:    shell.ModeCaptured,
-		Audit:   audit,
+	since, err := parseGitHistoryDateBound(input.Since, "git-history-since")
+	if err != nil {
+		return githistory.Query{}, err
+	}
+
+	until, err := parseGitHistoryDateBound(input.Until, "git-history-until")
+	if err != nil {
+		return githistory.Query{}, err
+	}
+
+	return githistory.Query{
+		Range:       strings.TrimSpace(input.Range),
+		Refs:        append([]string(nil), input.Refs...),
+		Paths:       append([]string(nil), input.Paths...),
+		Authors:     append([]string(nil), input.Authors...),
+		Since:       since,
+		Until:       until,
+		All:         input.All,
+		FirstParent: input.FirstParent,
+		NoMerges:    input.NoMerges,
+		MergesOnly:  input.MergesOnly,
+	}, nil
+}
+
+func parseGitHistoryDateBound(raw, name string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, nil
+	}
+
+	if value, err := time.Parse(time.RFC3339, raw); err == nil {
+		return value, nil
+	}
+
+	value, err := time.Parse("2006-01-02", raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339 or YYYY-MM-DD: %w", name, err)
+	}
+
+	return value, nil
+}
+
+func gitHistoryCommits(ctx context.Context, root string, level autonomy.Level, opts gitHistoryCollectOptions) ([]githistory.Commit, error) {
+	level = autonomy.Normalize(level)
+	if level == autonomy.Low {
+		return nil, errors.New("git history: autonomy low is advisory-only and blocks git history shell execution; rerun with --autonomy medium or higher")
+	}
+
+	audit := opts.Audit
+	if strings.TrimSpace(audit.Caller) == "" {
+		audit = gitHistoryAuditContext(level)
+	} else if strings.TrimSpace(audit.Autonomy) == "" {
+		audit.Autonomy = level.String()
+	}
+
+	commits, err := githistory.Collect(ctx, githistory.CollectorOptions{
+		RepoDir:      root,
+		Query:        opts.Query,
+		Audit:        audit,
+		MaxHunkBytes: opts.MaxHunkBytes,
+		IncludeHunks: opts.IncludeHunks,
+		RedactOutput: opts.RedactOutput,
+		OutputNote:   opts.OutputNote,
 	})
 	if err != nil {
-		return "", fmt.Errorf("git history: authorize git log: %w", err)
+		if strings.Contains(err.Error(), "githistory: git log:") {
+			return nil, fmt.Errorf("git history: run git log: %w", err)
+		}
+
+		return nil, fmt.Errorf("git history: collect: %w", err)
 	}
 
-	runErr := cmd.Run()
-	auditStdout := stdout.String()
-	auditStderr := stderr.String()
-
-	if opts.RedactOutput != nil {
-		auditStdout = opts.RedactOutput(auditStdout)
-		auditStderr = opts.RedactOutput(auditStderr)
-	}
-
-	if finishErr := invocation.Finish(shell.FinishOptions{
-		Stdout:        auditStdout,
-		Stderr:        auditStderr,
-		Error:         runErr,
-		OutputCapture: shell.OutputCaptured,
-		OutputNote:    opts.OutputNote,
-	}); finishErr != nil {
-		return "", fmt.Errorf("git history: audit git log: %w", finishErr)
-	}
-
-	if runErr != nil {
-		return "", fmt.Errorf("git history: run git log: %w", runErr)
-	}
-
-	return stdout.String(), nil
+	return commits, nil
 }
 
 func gitHistoryAuditContext(level autonomy.Level) shell.AuditContext {
@@ -1455,6 +1485,15 @@ func formatGitHistoryResult(result githistory.Result) string {
 		shortCommitHash(commit.Hash),
 		fmt.Sprintf("score=%d", result.Score),
 	}
+	if result.Confidence > 0 {
+		parts = append(parts, fmt.Sprintf("confidence=%.2f", result.Confidence))
+	}
+	if fields := gitHistoryMatchedFields(result.Matches); fields != "" {
+		parts = append(parts, "matched_fields="+fields)
+	}
+	if result.RangeContext != "" {
+		parts = append(parts, "range="+result.RangeContext)
+	}
 	if !commit.Date.IsZero() {
 		parts = append(parts, "date="+commit.Date.Format(time.RFC3339))
 	}
@@ -1466,6 +1505,12 @@ func formatGitHistoryResult(result githistory.Result) string {
 	if commit.Subject != "" {
 		parts = append(parts, "subject="+commit.Subject)
 	}
+	if changes := gitHistoryChangedFilesSummary(commit.Changes); changes != "" {
+		parts = append(parts, "changes="+changes)
+	}
+	if commit.DiffTruncated {
+		parts = append(parts, "diff_truncated=true")
+	}
 
 	for _, snippet := range result.Snippets {
 		if snippet.Text != "" {
@@ -1475,6 +1520,60 @@ func formatGitHistoryResult(result githistory.Result) string {
 	}
 
 	return strings.Join(parts, "\t")
+}
+
+func gitHistoryMatchedFields(matches []githistory.MatchEvidence) string {
+	seen := make(map[string]struct{})
+	fields := make([]string, 0)
+	for _, match := range matches {
+		field := strings.TrimSpace(match.Field)
+		if field == "" {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+
+		seen[field] = struct{}{}
+		fields = append(fields, field)
+	}
+
+	slices.Sort(fields)
+	return strings.Join(fields, ",")
+}
+
+func gitHistoryChangedFilesSummary(changes []githistory.ChangedFile) string {
+	if len(changes) == 0 {
+		return ""
+	}
+
+	limit := min(len(changes), 3)
+	parts := make([]string, 0, limit+1)
+	for i := range limit {
+		change := changes[i]
+		entry := change.Path
+		var details []string
+		if change.Status != "" {
+			details = append(details, change.Status)
+		}
+		if change.OldPath != "" {
+			details = append(details, "from="+change.OldPath)
+		}
+		if change.Binary {
+			details = append(details, "binary")
+		} else if change.Added != 0 || change.Deleted != 0 {
+			details = append(details, fmt.Sprintf("+%d/-%d", change.Added, change.Deleted))
+		}
+		if len(details) > 0 {
+			entry += "(" + strings.Join(details, ",") + ")"
+		}
+		parts = append(parts, entry)
+	}
+	if len(changes) > limit {
+		parts = append(parts, fmt.Sprintf("+%d more", len(changes)-limit))
+	}
+
+	return strings.Join(parts, ";")
 }
 
 func shortCommitHash(hash string) string {

@@ -344,6 +344,14 @@ type cliOptions struct {
 	evalExpectedPath                   string
 	evalMode                           string
 	gitHistorySearch                   string
+	gitHistoryIncludeHunks             bool
+	gitHistoryAll                      bool
+	gitHistoryFirstParent              bool
+	gitHistoryNoMerges                 bool
+	gitHistoryMergesOnly               bool
+	gitHistoryRange                    string
+	gitHistorySince                    string
+	gitHistoryUntil                    string
 	incidentFilePath                   string
 	incidentMCPManifestPath            string
 	incidentMCPServerName              string
@@ -510,6 +518,10 @@ type cliOptions struct {
 	routeOutputTokens                  positiveIntFlag
 	routeCacheWriteTokens              positiveIntFlag
 	gitHistoryLimit                    positiveIntFlag
+	gitHistoryMaxHunkBytes             positiveIntFlag
+	gitHistoryAuthors                  stringListFlag
+	gitHistoryPaths                    stringListFlag
+	gitHistoryRefs                     stringListFlag
 	incidentTimeout                    positiveIntFlag
 	pluginTimeout                      positiveIntFlag
 	bashTimeout                        positiveIntFlag

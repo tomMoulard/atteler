@@ -141,7 +141,7 @@ from the same descriptors that route the commands.
 | `research` | `atteler research run "Compare approaches for plugin sandboxing in Go CLIs"`, `atteler research run --trusted-source go.dev --trusted-source github.com --deny-source example-content-farm.com --warn-low-trust "Research best practices for safe agent worktrees"`, `atteler research run --output .atteler/research/plugin-sandboxing --generate-tasks "Find viable implementation approaches for sandboxing Atteler plugins"` |
 | `autoresearch` | `atteler autoresearch run "Improve agent-loop recovery; keep only changes that pass make test"`, `atteler autoresearch "Reduce prompt-context cache misses and validate with go test ./cmd/atteler"`, `atteler session headless` |
 | `issue` | `atteler issue implement GH-218 --open-pr`, `atteler issue implement https://github.com/owner/repo/issues/218 --open-pr`, `atteler issue implement GH-218 --open-pr --base main --run-tests --run-lint`, `atteler issue watch --github owner/repo --label atteler-agent --once`, `atteler issue watch --github owner/repo --label ready-for-ai --dry-run`, `atteler issue watch --github owner/repo --label atteler-agent --command 'atteler --once "Read $ATTELER_ISSUE_WATCH_PLAN, implement locally, and do not publish."' --validation-command "go test ./..." --once`, `atteler issue list-candidates --github owner/repo --label ready-for-ai`, `atteler issue run 232 --github owner/repo` |
-| `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression"`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
+| `memory` / `retrieval` | `atteler memory search "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm"`, `atteler memory retrieve "OAuth retry storm" --retrieval-source vector`, `atteler memory git-history "memory regression" --git-history-path pkg/memory --git-history-range v1.0..HEAD`, `atteler memory vector-search "redirect risks"`, `atteler memory vector-index docs/research.md` |
 | `code-intel` | `atteler code-intel summary`, `atteler code-intel summary --json`, `atteler code-intel query definitions:Run`, `atteler code-intel symbol NewRegistry`, `atteler code-intel import-prefix github.com/tommoulard/atteler/pkg/` |
 | `incident` | `atteler incident diagnose --sentry ISSUE-912`, `atteler incident diagnose --incident-file redacted-sentry-event.json`, `atteler incident diagnose --sentry ISSUE-912 --incident-apply-fix --incident-validation-command "go test ./pkg/auth"` |
 | `review` | `atteler review scan`, `atteler review plan`, `atteler review run` |
@@ -405,7 +405,7 @@ implementation and tests. Highlights — see
 - Sessions, transcript search/export, evaluations, provenance-rich artifacts,
   and multi-agent run audits
 - Bounded, policy-gated context references; per-agent and workspace retrieval
-  (lexical + vector), git-history search, and incremental code intelligence
+  (lexical + vector), git-native history search with range/path/author filters, and incremental code intelligence
 - Governed plugins and MCP, lifecycle hook privacy with a durable delivery
   ledger, automatic git-worktree isolation, and the Symphony issue-to-PR pipeline
 

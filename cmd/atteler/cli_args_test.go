@@ -88,6 +88,11 @@ func TestTranslateCLIArgs_DomainCommandsMapToCompatibilityFlags(t *testing.T) {
 			want: []string{"--memory-search", "OAuth retry", "--memory-scope", "repo", "--memory-tag", "security"},
 		},
 		{
+			name: "memory git history keeps git semantic filters parseable",
+			args: []string{"memory", "git-history", "rename", "collector", "--git-history-path", "pkg/githistory", "--git-history-range", "v1.0..HEAD", "--git-history-no-merges"},
+			want: []string{"--git-history-search", "rename collector", "--git-history-path", "pkg/githistory", "--git-history-range", "v1.0..HEAD", "--git-history-no-merges"},
+		},
+		{
 			name: "incident diagnose maps to incident flags",
 			args: []string{"incident", "diagnose", "--sentry", "ISSUE-912"},
 			want: []string{"--incident-diagnose", "--sentry", "ISSUE-912"},
