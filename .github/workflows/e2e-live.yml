@@ -41,6 +41,7 @@ jobs:
 
       - name: Live provider E2E
         run: |
+          set -o pipefail
           mkdir -p artifacts
           make e2e-live 2>&1 | tee artifacts/e2e-live.log
 

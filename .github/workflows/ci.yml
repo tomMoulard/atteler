@@ -52,6 +52,7 @@ jobs:
 
       - name: Black-box CLI E2E
         run: |
+          set -o pipefail
           mkdir -p artifacts
           make e2e 2>&1 | tee artifacts/e2e.log
 
@@ -82,6 +83,7 @@ jobs:
 
       - name: Smoke GoReleaser snapshot artifact
         run: |
+          set -o pipefail
           mkdir -p artifacts
           .github/scripts/smoke-goreleaser-snapshot.sh dist 2>&1 | tee artifacts/release-smoke.log
 

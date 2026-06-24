@@ -501,6 +501,8 @@ func TestReleaseGateWorkflowsRunBlackBoxE2EAndSnapshotSmoke(t *testing.T) {
 
 		assertWorkflowRunStep(t, wf, "Black-box CLI E2E", "make e2e")
 		assertWorkflowRunStep(t, wf, "Smoke GoReleaser snapshot artifact", ".github/scripts/smoke-goreleaser-snapshot.sh dist")
+		assertWorkflowTeeStepUsesPipefail(t, wf, "Black-box CLI E2E")
+		assertWorkflowTeeStepUsesPipefail(t, wf, "Smoke GoReleaser snapshot artifact")
 		assert.Contains(t, content, "actions/upload-artifact@v4", "%s should upload E2E/smoke logs on failure", workflowName)
 	}
 }
@@ -519,6 +521,7 @@ func TestLiveE2EWorkflowDocumentsManualAndScheduledProviderPath(t *testing.T) {
 	assert.Contains(t, content, "secrets.OPENAI_API_KEY")
 	assert.Contains(t, content, "secrets.ANTHROPIC_API_KEY")
 	assertWorkflowRunStep(t, wf, "Live provider E2E", "make e2e-live")
+	assertWorkflowTeeStepUsesPipefail(t, wf, "Live provider E2E")
 }
 
 func assertWorkflowRunStep(t *testing.T, workflow workflow, name, command string) {
@@ -533,6 +536,25 @@ func assertWorkflowRunStep(t *testing.T, workflow workflow, name, command string
 	}
 
 	assert.Failf(t, "missing workflow step", "workflow should include step %q running %q", name, command)
+}
+
+func assertWorkflowTeeStepUsesPipefail(t *testing.T, workflow workflow, name string) {
+	t.Helper()
+
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if step.Name != name {
+				continue
+			}
+
+			assert.Contains(t, step.Run, "| tee ", "workflow step %q should capture logs with tee", name)
+			assert.Contains(t, step.Run, "set -o pipefail", "workflow step %q should fail when the command before tee fails", name)
+
+			return
+		}
+	}
+
+	assert.Failf(t, "missing workflow step", "workflow should include step %q", name)
 }
 
 func repositoryRoot(t *testing.T) string {
