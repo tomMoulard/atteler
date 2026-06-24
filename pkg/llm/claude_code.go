@@ -61,7 +61,7 @@ func NewClaudeCodeProviderWithConfigContext(ctx context.Context, cfg ProviderCon
 		return nil, errors.New("claude code private adapter disabled")
 	}
 
-	auth, err := loadClaudeCodeAuth(ctx)
+	auth, err := loadClaudeCodeAuthWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +118,16 @@ func (c *ClaudeCodeProvider) AdapterDiagnostics() AdapterDiagnostics {
 				Detail: readinessDetail(c.auth != nil && c.auth.hasRefreshToken(), "refresh_token available for one retry after HTTP 401", "missing refresh_token; adapter cannot recover from expired access tokens"),
 			},
 			{
+				Name:   "credential_provenance",
+				Status: readinessStatus(c.auth != nil),
+				Detail: claudeCodeCredentialProvenanceDetail(c.auth),
+			},
+			{
+				Name:   "credential_policy",
+				Status: ReadinessWarning,
+				Detail: claudeCodeCredentialPolicyDetail(c.auth),
+			},
+			{
 				Name:   "network_reachability",
 				Status: ReadinessSkipped,
 				Detail: "not probed during doctor; OAuth-mode Messages access is verified only by a completion request",
@@ -133,6 +143,22 @@ func (c *ClaudeCodeProvider) AdapterDiagnostics() AdapterDiagnostics {
 		},
 		Models: c.Models(),
 	}
+}
+
+func claudeCodeCredentialProvenanceDetail(auth *claudeCodeAuth) string {
+	if auth == nil {
+		return "no Claude Code credential source loaded"
+	}
+
+	return auth.source.detail()
+}
+
+func claudeCodeCredentialPolicyDetail(auth *claudeCodeAuth) string {
+	if auth == nil {
+		return credentialPolicySummary(CredentialSourcePolicy{})
+	}
+
+	return credentialPolicySummary(auth.credentialPolicy)
 }
 
 // ProviderModelsVerified reports whether FetchModels is an authoritative live

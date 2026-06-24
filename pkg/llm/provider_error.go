@@ -4,11 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
 
-const providerErrorMessageLimit = 4096
+const (
+	providerErrorMessageLimit = 4096
+	nilErrorMessage           = "<nil>"
+)
+
+var ( // #nosec G101 -- redaction keyword regexps, not credentials.
+	providerErrorSecretAssignmentPattern = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|authorization|token|secret|password|credential)[A-Za-z0-9_.-]*)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:Bearer|Basic|Token)\s+(?:"[^"]*"|'[^']*'|\[[^\]]+\]|[^\s,"'&}\]]+)|\[[^\]]+\]|[^\s,"'&}\]]+)`)
+	providerErrorBearerPattern           = regexp.MustCompile(`(?i)\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	providerErrorOpenAIKeyPattern        = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}\b`)
+	providerErrorJWTPattern              = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
+)
 
 // Retryability describes whether a provider error is safe to retry.
 type Retryability string
@@ -41,7 +52,7 @@ type ProviderError struct {
 // callers via errors.As.
 func (e *ProviderError) Error() string {
 	if e == nil {
-		return "<nil>"
+		return nilErrorMessage
 	}
 
 	provider := strings.TrimSpace(e.Provider)
@@ -49,7 +60,7 @@ func (e *ProviderError) Error() string {
 		provider = "provider"
 	}
 
-	message := strings.TrimSpace(e.Message)
+	message := RedactDiagnosticMessage(strings.TrimSpace(e.Message))
 	if message == "" {
 		message = http.StatusText(e.StatusCode)
 	}
@@ -60,7 +71,7 @@ func (e *ProviderError) Error() string {
 	}
 
 	if e.RequestID != "" {
-		metadata = append(metadata, "request_id="+e.RequestID)
+		metadata = append(metadata, "request_id="+RedactDiagnosticMessage(e.RequestID))
 	}
 
 	if e.RetryAfter > 0 {
@@ -176,7 +187,7 @@ func providerRequestID(header http.Header) string {
 		"cf-ray",
 	} {
 		if value := strings.TrimSpace(header.Get(key)); value != "" {
-			return value
+			return redactProviderErrorMessage(value)
 		}
 	}
 
@@ -275,6 +286,8 @@ func stringifyProviderErrorObject(value map[string]any) string {
 }
 
 func truncateProviderErrorMessage(message string) string {
+	message = redactProviderErrorMessage(message)
+
 	if len(message) <= providerErrorMessageLimit {
 		return message
 	}
@@ -290,4 +303,19 @@ func truncateProviderErrorMessage(message string) string {
 	}
 
 	return message[:cut] + "…"
+}
+
+func redactProviderErrorMessage(message string) string {
+	message = providerErrorOpenAIKeyPattern.ReplaceAllString(message, "[REDACTED]")
+	message = providerErrorJWTPattern.ReplaceAllString(message, "[REDACTED]")
+	message = providerErrorBearerPattern.ReplaceAllString(message, "$1 [REDACTED]")
+	message = providerErrorSecretAssignmentPattern.ReplaceAllString(message, "$1$3[REDACTED]")
+
+	return message
+}
+
+// RedactDiagnosticMessage removes credential-shaped values from diagnostic
+// strings before they are displayed, logged, or serialized.
+func RedactDiagnosticMessage(message string) string {
+	return redactProviderErrorMessage(message)
 }

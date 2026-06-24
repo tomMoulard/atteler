@@ -100,6 +100,7 @@ func (c AutoRegisterConfig) logger() *slog.Logger {
 //nolint:govet // Field order keeps externally useful provider settings grouped.
 type ProviderConfig struct {
 	Retry                 RetryPolicyConfig
+	CredentialPolicy      CredentialSourcePolicy
 	BaseURL               string
 	Type                  string
 	APIKeyEnv             string
@@ -614,7 +615,7 @@ func privateAdapterCredentialFailure(
 	diagnostics := AdapterDiagnostics{
 		Contract: contract,
 		Checks: []ReadinessCheck{
-			{Name: "local_credentials", Status: ReadinessFailed, Detail: err.Error()},
+			{Name: "local_credentials", Status: ReadinessFailed, Detail: RedactDiagnosticMessage(err.Error())},
 			{Name: "token_refresh", Status: ReadinessSkipped, Detail: "not checked because local credentials did not load"},
 			{Name: "network_reachability", Status: ReadinessSkipped, Detail: "not probed during doctor; adapter did not pass local credential checks"},
 			{Name: "model_availability", Status: ReadinessWarning, Detail: "static catalog only; model availability is not network verified"},
@@ -629,17 +630,17 @@ func privateAdapterCredentialFailure(
 func providerHealthFromDiagnostics(providerName string, diagnostics AdapterDiagnostics) ProviderHealth {
 	health := ProviderHealth{
 		Name:         providerName,
-		Checks:       append([]ReadinessCheck(nil), diagnostics.Checks...),
-		Warnings:     append([]string(nil), diagnostics.Warnings...),
+		Checks:       redactReadinessChecks(diagnostics.Checks),
+		Warnings:     redactDiagnosticStrings(diagnostics.Warnings),
 		Models:       append([]string(nil), diagnostics.Models...),
 		StaticModels: append([]string(nil), diagnostics.Models...),
 		ModelSource:  ModelCatalogSourceStatic,
 		Healthy:      diagnostics.Healthy(),
-		Error:        diagnostics.Error(),
+		Error:        redactDiagnosticError(diagnostics.Error()),
 	}
 
 	if diagnostics.Contract.AdapterVersion != "" {
-		contract := diagnostics.Contract
+		contract := redactAdapterContract(diagnostics.Contract)
 		health.Contract = &contract
 	}
 
@@ -826,6 +827,8 @@ func providerConfig(cfg AutoRegisterConfig, name string) ProviderConfig {
 
 	provider.Models = append([]string(nil), provider.Models...)
 	provider.Capabilities = append([]string(nil), provider.Capabilities...)
+	provider.CredentialPolicy.AllowedProviders = append([]string(nil), provider.CredentialPolicy.AllowedProviders...)
+	provider.CredentialPolicy.AllowedStores = append([]string(nil), provider.CredentialPolicy.AllowedStores...)
 
 	return provider
 }

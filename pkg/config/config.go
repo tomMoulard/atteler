@@ -56,24 +56,43 @@ type Config struct {
 }
 
 // ProviderConfig configures an individual LLM provider.
+//
+//nolint:govet // Field order follows public config-file grouping.
 type ProviderConfig struct {
-	Retry                 RetryConfig `json:"retry,omitzero" yaml:"retry,omitempty"`
-	BaseURL               string      `json:"base_url,omitempty" yaml:"base_url,omitempty"`
-	Type                  string      `json:"type,omitempty" yaml:"type,omitempty"`
-	APIKeyEnv             string      `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
-	APIKeyHeader          string      `json:"api_key_header,omitempty" yaml:"api_key_header,omitempty"`
-	APIKeyScheme          string      `json:"api_key_scheme,omitempty" yaml:"api_key_scheme,omitempty"`
-	ChatCompletionsPath   string      `json:"chat_completions_path,omitempty" yaml:"chat_completions_path,omitempty"`
-	EmbeddingsPath        string      `json:"embeddings_path,omitempty" yaml:"embeddings_path,omitempty"`
-	ModelsPath            string      `json:"models_path,omitempty" yaml:"models_path,omitempty"`
-	APIVersion            string      `json:"api_version,omitempty" yaml:"api_version,omitempty"`
-	Models                []string    `json:"models,omitempty" yaml:"models,omitempty"`
-	Capabilities          []string    `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
-	Disabled              bool        `json:"disabled,omitempty" yaml:"disabled,omitempty"`
-	Local                 bool        `json:"local,omitempty" yaml:"local,omitempty"`
-	AutoStart             bool        `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
-	DisablePrivateAdapter bool        `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
-	TimeoutSeconds        int         `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	Retry                 RetryConfig            `json:"retry,omitzero" yaml:"retry,omitempty"`
+	CredentialPolicy      CredentialPolicyConfig `json:"credential_policy,omitzero" yaml:"credential_policy,omitempty"`
+	BaseURL               string                 `json:"base_url,omitempty" yaml:"base_url,omitempty"`
+	Type                  string                 `json:"type,omitempty" yaml:"type,omitempty"`
+	APIKeyEnv             string                 `json:"api_key_env,omitempty" yaml:"api_key_env,omitempty"`
+	APIKeyHeader          string                 `json:"api_key_header,omitempty" yaml:"api_key_header,omitempty"`
+	APIKeyScheme          string                 `json:"api_key_scheme,omitempty" yaml:"api_key_scheme,omitempty"`
+	ChatCompletionsPath   string                 `json:"chat_completions_path,omitempty" yaml:"chat_completions_path,omitempty"`
+	EmbeddingsPath        string                 `json:"embeddings_path,omitempty" yaml:"embeddings_path,omitempty"`
+	ModelsPath            string                 `json:"models_path,omitempty" yaml:"models_path,omitempty"`
+	APIVersion            string                 `json:"api_version,omitempty" yaml:"api_version,omitempty"`
+	Models                []string               `json:"models,omitempty" yaml:"models,omitempty"`
+	Capabilities          []string               `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
+	Disabled              bool                   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	Local                 bool                   `json:"local,omitempty" yaml:"local,omitempty"`
+	AutoStart             bool                   `json:"auto_start,omitempty" yaml:"auto_start,omitempty"`
+	DisablePrivateAdapter bool                   `json:"disable_private_adapter,omitempty" yaml:"disable_private_adapter,omitempty"`
+	TimeoutSeconds        int                    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+}
+
+// CredentialPolicyConfig controls which credential stores a provider may use
+// and whether borrowed OAuth sessions may be refreshed or written back.
+type CredentialPolicyConfig struct {
+	AllowedProviders      []string `json:"allowed_providers,omitempty" yaml:"allowed_providers,omitempty"`
+	AllowedStores         []string `json:"allowed_stores,omitempty" yaml:"allowed_stores,omitempty"`
+	Configured            bool     `json:"-" yaml:"-"`
+	AllowedProvidersSet   bool     `json:"-" yaml:"-"`
+	AllowedStoresSet      bool     `json:"-" yaml:"-"`
+	AllowBorrowedOAuthSet bool     `json:"-" yaml:"-"`
+	AllowRefreshSet       bool     `json:"-" yaml:"-"`
+	AllowWriteBackSet     bool     `json:"-" yaml:"-"`
+	AllowBorrowedOAuth    bool     `json:"allow_borrowed_oauth,omitempty" yaml:"allow_borrowed_oauth,omitempty"`
+	AllowRefresh          bool     `json:"allow_refresh,omitempty" yaml:"allow_refresh,omitempty"`
+	AllowWriteBack        bool     `json:"allow_write_back,omitempty" yaml:"allow_write_back,omitempty"`
 }
 
 // RetryConfig configures provider retry behavior. Nil fields inherit the
@@ -586,23 +605,32 @@ type fileConfig struct {
 
 //nolint:govet // Field order follows the public provider YAML shape.
 type fileProviderConfig struct {
-	Disabled              *bool           `json:"disabled" yaml:"disabled"`
-	Local                 *bool           `json:"local" yaml:"local"`
-	AutoStart             *bool           `json:"auto_start" yaml:"auto_start"`
-	DisablePrivateAdapter *bool           `json:"disable_private_adapter" yaml:"disable_private_adapter"`
-	BaseURL               *string         `json:"base_url" yaml:"base_url"`
-	Type                  *string         `json:"type" yaml:"type"`
-	APIKeyEnv             *string         `json:"api_key_env" yaml:"api_key_env"`
-	APIKeyHeader          *string         `json:"api_key_header" yaml:"api_key_header"`
-	APIKeyScheme          *string         `json:"api_key_scheme" yaml:"api_key_scheme"`
-	ChatCompletionsPath   *string         `json:"chat_completions_path" yaml:"chat_completions_path"`
-	EmbeddingsPath        *string         `json:"embeddings_path" yaml:"embeddings_path"`
-	ModelsPath            *string         `json:"models_path" yaml:"models_path"`
-	APIVersion            *string         `json:"api_version" yaml:"api_version"`
-	Models                []string        `json:"models" yaml:"models"`
-	Capabilities          []string        `json:"capabilities" yaml:"capabilities"`
-	Retry                 fileRetryConfig `json:"retry" yaml:"retry"`
-	TimeoutSeconds        *int            `json:"timeout_seconds" yaml:"timeout_seconds"`
+	Disabled              *bool                      `json:"disabled" yaml:"disabled"`
+	Local                 *bool                      `json:"local" yaml:"local"`
+	AutoStart             *bool                      `json:"auto_start" yaml:"auto_start"`
+	DisablePrivateAdapter *bool                      `json:"disable_private_adapter" yaml:"disable_private_adapter"`
+	BaseURL               *string                    `json:"base_url" yaml:"base_url"`
+	Type                  *string                    `json:"type" yaml:"type"`
+	APIKeyEnv             *string                    `json:"api_key_env" yaml:"api_key_env"`
+	APIKeyHeader          *string                    `json:"api_key_header" yaml:"api_key_header"`
+	APIKeyScheme          *string                    `json:"api_key_scheme" yaml:"api_key_scheme"`
+	ChatCompletionsPath   *string                    `json:"chat_completions_path" yaml:"chat_completions_path"`
+	EmbeddingsPath        *string                    `json:"embeddings_path" yaml:"embeddings_path"`
+	ModelsPath            *string                    `json:"models_path" yaml:"models_path"`
+	APIVersion            *string                    `json:"api_version" yaml:"api_version"`
+	Models                []string                   `json:"models" yaml:"models"`
+	Capabilities          []string                   `json:"capabilities" yaml:"capabilities"`
+	Retry                 fileRetryConfig            `json:"retry" yaml:"retry"`
+	CredentialPolicy      fileCredentialPolicyConfig `json:"credential_policy" yaml:"credential_policy"`
+	TimeoutSeconds        *int                       `json:"timeout_seconds" yaml:"timeout_seconds"`
+}
+
+type fileCredentialPolicyConfig struct {
+	AllowBorrowedOAuth *bool    `json:"allow_borrowed_oauth" yaml:"allow_borrowed_oauth"`
+	AllowRefresh       *bool    `json:"allow_refresh" yaml:"allow_refresh"`
+	AllowWriteBack     *bool    `json:"allow_write_back" yaml:"allow_write_back"`
+	AllowedProviders   []string `json:"allowed_providers" yaml:"allowed_providers"`
+	AllowedStores      []string `json:"allowed_stores" yaml:"allowed_stores"`
 }
 
 type fileRetryConfig struct {
@@ -1328,10 +1356,71 @@ func mergeProviders(dst *Config, providers map[string]fileProviderConfig, rec *o
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, *provider.TimeoutSeconds)
 		}
 
+		mergeFileCredentialPolicyConfig(
+			&current.CredentialPolicy,
+			provider.CredentialPolicy,
+			rec,
+			source,
+			providerFieldPath(name, "credential_policy"),
+		)
 		mergeFileRetryConfig(&current.Retry, provider.Retry, rec, source, providerFieldPath(name, "retry"))
 
 		dst.Providers[name] = current
 	}
+}
+
+func mergeFileCredentialPolicyConfig(
+	dst *CredentialPolicyConfig,
+	src fileCredentialPolicyConfig,
+	rec *originRecorder,
+	source originSource,
+	path string,
+) {
+	if !src.hasFields() {
+		return
+	}
+
+	dst.Configured = true
+
+	rec.merge(path, source, "credential_policy", "merges provider credential-source policy fields")
+
+	if src.AllowedProviders != nil {
+		dst.AllowedProviders = append([]string(nil), src.AllowedProviders...)
+		dst.AllowedProvidersSet = true
+		rec.replace(dottedPath(path, "allowed_providers"), source, dst.AllowedProviders, "replaces the allowed credential provider list")
+	}
+
+	if src.AllowedStores != nil {
+		dst.AllowedStores = append([]string(nil), src.AllowedStores...)
+		dst.AllowedStoresSet = true
+		rec.replace(dottedPath(path, "allowed_stores"), source, dst.AllowedStores, "replaces the allowed credential store list")
+	}
+
+	if src.AllowBorrowedOAuth != nil {
+		dst.AllowBorrowedOAuth = *src.AllowBorrowedOAuth
+		dst.AllowBorrowedOAuthSet = true
+		rec.set(dottedPath(path, "allow_borrowed_oauth"), source, dst.AllowBorrowedOAuth)
+	}
+
+	if src.AllowRefresh != nil {
+		dst.AllowRefresh = *src.AllowRefresh
+		dst.AllowRefreshSet = true
+		rec.set(dottedPath(path, "allow_refresh"), source, dst.AllowRefresh)
+	}
+
+	if src.AllowWriteBack != nil {
+		dst.AllowWriteBack = *src.AllowWriteBack
+		dst.AllowWriteBackSet = true
+		rec.set(dottedPath(path, "allow_write_back"), source, dst.AllowWriteBack)
+	}
+}
+
+func (c fileCredentialPolicyConfig) hasFields() bool {
+	return c.AllowedProviders != nil ||
+		c.AllowedStores != nil ||
+		c.AllowBorrowedOAuth != nil ||
+		c.AllowRefresh != nil ||
+		c.AllowWriteBack != nil
 }
 
 func mergeFileRetryConfig(dst *RetryConfig, src fileRetryConfig, rec *originRecorder, source originSource, path string) {
@@ -2193,10 +2282,83 @@ func mergeConfigProviders(dst *Config, providers map[string]ProviderConfig, rec 
 			rec.set(providerFieldPath(name, "timeout_seconds"), source, provider.TimeoutSeconds)
 		}
 
+		mergeCredentialPolicyConfig(&current.CredentialPolicy, provider.CredentialPolicy, rec, source, providerFieldPath(name, "credential_policy"))
 		mergeRetryConfig(&current.Retry, provider.Retry, rec, source, providerFieldPath(name, "retry"))
 
 		dst.Providers[name] = current
 	}
+}
+
+func mergeCredentialPolicyConfig(
+	dst *CredentialPolicyConfig,
+	src CredentialPolicyConfig,
+	rec *originRecorder,
+	source originSource,
+	path string,
+) {
+	if !src.hasFields() {
+		return
+	}
+
+	dst.Configured = true
+
+	rec.merge(path, source, "credential_policy", "merges provider credential-source policy fields")
+
+	if src.AllowedProviders != nil {
+		dst.AllowedProviders = append([]string(nil), src.AllowedProviders...)
+		dst.AllowedProvidersSet = true
+		rec.replace(dottedPath(path, "allowed_providers"), source, dst.AllowedProviders, "replaces the allowed credential provider list")
+	}
+
+	if src.AllowedStores != nil {
+		dst.AllowedStores = append([]string(nil), src.AllowedStores...)
+		dst.AllowedStoresSet = true
+		rec.replace(dottedPath(path, "allowed_stores"), source, dst.AllowedStores, "replaces the allowed credential store list")
+	}
+
+	if src.AllowBorrowedOAuthSet || src.AllowBorrowedOAuth {
+		dst.AllowBorrowedOAuth = true
+		if src.AllowBorrowedOAuthSet {
+			dst.AllowBorrowedOAuth = src.AllowBorrowedOAuth
+		}
+
+		dst.AllowBorrowedOAuthSet = true
+		rec.set(dottedPath(path, "allow_borrowed_oauth"), source, dst.AllowBorrowedOAuth)
+	}
+
+	if src.AllowRefreshSet || src.AllowRefresh {
+		dst.AllowRefresh = true
+		if src.AllowRefreshSet {
+			dst.AllowRefresh = src.AllowRefresh
+		}
+
+		dst.AllowRefreshSet = true
+		rec.set(dottedPath(path, "allow_refresh"), source, dst.AllowRefresh)
+	}
+
+	if src.AllowWriteBackSet || src.AllowWriteBack {
+		dst.AllowWriteBack = true
+		if src.AllowWriteBackSet {
+			dst.AllowWriteBack = src.AllowWriteBack
+		}
+
+		dst.AllowWriteBackSet = true
+		rec.set(dottedPath(path, "allow_write_back"), source, dst.AllowWriteBack)
+	}
+}
+
+func (c CredentialPolicyConfig) hasFields() bool {
+	if c.Configured || c.AllowBorrowedOAuthSet || c.AllowRefreshSet || c.AllowWriteBackSet {
+		return true
+	}
+
+	return c.AllowedProvidersSet ||
+		c.AllowedStoresSet ||
+		c.AllowedProviders != nil ||
+		c.AllowedStores != nil ||
+		c.AllowBorrowedOAuth ||
+		c.AllowRefresh ||
+		c.AllowWriteBack
 }
 
 func mergeRetryConfig(dst *RetryConfig, src RetryConfig, rec *originRecorder, source originSource, path string) {
@@ -2984,8 +3146,74 @@ func mergeConfigProvidersFromOrigins(dst *Config, providers map[string]ProviderC
 			)
 		}
 
+		current.CredentialPolicy = mergeCredentialPolicyConfigFromOrigins(
+			current.CredentialPolicy,
+			provider.CredentialPolicy,
+			dstOrigins,
+			srcOrigins,
+			providerFieldPath(name, "credential_policy"),
+		)
+
 		dst.Providers[name] = current
 	}
+}
+
+func mergeCredentialPolicyConfigFromOrigins(
+	current CredentialPolicyConfig,
+	provider CredentialPolicyConfig,
+	dstOrigins OriginMap,
+	srcOrigins OriginMap,
+	path string,
+) CredentialPolicyConfig {
+	if !originPathExists(srcOrigins, path) {
+		return current
+	}
+
+	current.Configured = true
+
+	appendOriginChain(dstOrigins, path, srcOrigins, false)
+
+	allowedProvidersPath := dottedPath(path, "allowed_providers")
+	if originPathExists(srcOrigins, allowedProvidersPath) {
+		current.AllowedProviders = append([]string(nil), provider.AllowedProviders...)
+		current.AllowedProvidersSet = true
+
+		appendOriginChain(dstOrigins, allowedProvidersPath, srcOrigins, true)
+	}
+
+	allowedStoresPath := dottedPath(path, "allowed_stores")
+	if originPathExists(srcOrigins, allowedStoresPath) {
+		current.AllowedStores = append([]string(nil), provider.AllowedStores...)
+		current.AllowedStoresSet = true
+
+		appendOriginChain(dstOrigins, allowedStoresPath, srcOrigins, true)
+	}
+
+	allowBorrowedPath := dottedPath(path, "allow_borrowed_oauth")
+	if originPathExists(srcOrigins, allowBorrowedPath) {
+		current.AllowBorrowedOAuth = provider.AllowBorrowedOAuth
+		current.AllowBorrowedOAuthSet = true
+
+		appendOriginChain(dstOrigins, allowBorrowedPath, srcOrigins, false)
+	}
+
+	allowRefreshPath := dottedPath(path, "allow_refresh")
+	if originPathExists(srcOrigins, allowRefreshPath) {
+		current.AllowRefresh = provider.AllowRefresh
+		current.AllowRefreshSet = true
+
+		appendOriginChain(dstOrigins, allowRefreshPath, srcOrigins, false)
+	}
+
+	allowWriteBackPath := dottedPath(path, "allow_write_back")
+	if originPathExists(srcOrigins, allowWriteBackPath) {
+		current.AllowWriteBack = provider.AllowWriteBack
+		current.AllowWriteBackSet = true
+
+		appendOriginChain(dstOrigins, allowWriteBackPath, srcOrigins, false)
+	}
+
+	return current
 }
 
 func originPathExists(origins OriginMap, path string) bool {

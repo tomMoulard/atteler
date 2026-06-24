@@ -1470,7 +1470,7 @@ exit 0
 
 	selectScript := filepath.Join(workDir, "select-model.exp")
 	writeFile(t, selectScript, `set timeout 10
-spawn env PATH=$env(ATTELER_TEST_PATH) ATTELER_STATE=$env(ATTELER_STATE) ATTELER_SESSION_DIR=$env(ATTELER_SESSION_DIR) CODEX_HOME=$env(CODEX_HOME) $env(ATTELER_BIN)
+spawn env PATH=$env(ATTELER_TEST_PATH) ATTELER_STATE=$env(ATTELER_STATE) ATTELER_SESSION_DIR=$env(ATTELER_SESSION_DIR) CODEX_HOME=$env(CODEX_HOME) ATTELER_CREDENTIAL_ALLOWED_STORES=codex_auth_json ATTELER_ALLOW_BORROWED_OAUTH=1 $env(ATTELER_BIN)
 expect -exact "Send a message"
 send "\017"
 expect -exact "Keep selected model?"
@@ -1500,7 +1500,7 @@ expect eof
 
 	reopenScript := filepath.Join(workDir, "reopen.exp")
 	writeFile(t, reopenScript, `set timeout 10
-spawn env PATH=$env(ATTELER_TEST_PATH) ATTELER_STATE=$env(ATTELER_STATE) ATTELER_SESSION_DIR=$env(ATTELER_SESSION_DIR) CODEX_HOME=$env(CODEX_HOME) $env(ATTELER_BIN)
+spawn env PATH=$env(ATTELER_TEST_PATH) ATTELER_STATE=$env(ATTELER_STATE) ATTELER_SESSION_DIR=$env(ATTELER_SESSION_DIR) CODEX_HOME=$env(CODEX_HOME) ATTELER_CREDENTIAL_ALLOWED_STORES=codex_auth_json ATTELER_ALLOW_BORROWED_OAUTH=1 $env(ATTELER_BIN)
 expect -exact "\[model:codex/gpt-5.5\]"
 send "\004"
 expect eof
@@ -1536,6 +1536,10 @@ agents:
 providers:
   anthropic:
     disabled: true
+  codex:
+    credential_policy:
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
   openai:
     disabled: true
 `)
@@ -1665,6 +1669,10 @@ default_model: claude-code/claude-opus-4-7
 providers:
   anthropic:
     disabled: true
+  claude-code:
+    credential_policy:
+      allowed_stores: [claude_code_file]
+      allow_borrowed_oauth: true
   codex:
     disabled: true
   ollama:

@@ -97,6 +97,12 @@ func TestLiveForgeClaudeOneShot(t *testing.T) {
 	configPath := filepath.Join(workDir, "atteler.yaml")
 	writeFile(t, configPath, `default_provider: anthropic
 providers:
+  anthropic:
+    credential_policy:
+      allowed_stores: [env, forge_credentials]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
   openai:
     disabled: true
 generation:
@@ -130,6 +136,12 @@ func TestLiveClaudeCodeOneShot(t *testing.T) {
 providers:
   anthropic:
     disabled: true
+  claude-code:
+    credential_policy:
+      allowed_stores: [claude_code_keychain, claude_code_file]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
   codex:
     disabled: true
   openai:
@@ -251,6 +263,12 @@ func liveCodexConfig() string {
 providers:
   anthropic:
     disabled: true
+  codex:
+    credential_policy:
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
   openai:
     disabled: true
 `

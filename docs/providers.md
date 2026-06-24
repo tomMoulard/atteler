@@ -23,16 +23,52 @@ the macOS keychain or `~/.claude/.credentials.json`; the ChatGPT auth in
 Codex Responses backend. There is no subprocess, CLI tool sandbox, or workspace
 sandbox; atteler only forwards the tool definitions configured for the request.
 
-Disable the borrowed-credential adapters with `disable_private_adapter: true`
-(or the `ATTELER_DISABLE_*_ADAPTER` env vars) without disabling the normal
-providers. For the exact execution path, credential source, token-refresh
-behavior, endpoint, and health check of every provider, see the generated
-**Provider runtime contracts** and **compatibility matrix** in the
-[project README](https://github.com/tomMoulard/atteler#providers).
+Borrowed/local CLI credential stores are a trust boundary, not just a
+convenience fallback. By default Atteler only uses provider credentials supplied
+through environment variables. To let a provider read another CLI's credential
+store, configure the provider's `credential_policy` explicitly:
+
+```yaml
+providers:
+  codex:
+    credential_policy:
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+  claude-code:
+    credential_policy:
+      allowed_stores: [claude_code_keychain, claude_code_file]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+  anthropic:
+    credential_policy:
+      allowed_stores: [env, forge_credentials, claude_code_keychain, claude_code_file]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+```
+
+`allowed_providers` can further narrow a policy to resolved provider names
+(for example `anthropic`, `codex`, or `openai`). External CLI ownership remains
+controlled by `allowed_stores` plus `allow_borrowed_oauth`. Omitting
+`allowed_stores` keeps env-only credentials available; `allowed_stores: []`
+intentionally denies every credential store.
+Refresh/write-back events are recorded in the credential audit ledger alongside
+the side-effect permission ledger, with source/store/provenance only and no
+token values. Disable the borrowed-credential adapters entirely with
+`disable_private_adapter: true` (or the `ATTELER_DISABLE_*_ADAPTER` env vars)
+without disabling the normal providers. For the exact execution path,
+credential source, token-refresh behavior, endpoint, and health check of every
+provider, see the generated **Provider runtime contracts** and **compatibility
+matrix** in the [project README](https://github.com/tomMoulard/atteler#providers).
 
 ## Authentication
 
 Auth resolves in layers (`pkg/llm/auth.go` and the keychain helpers): environment
 variables, on-disk auth files (`~/.codex/auth.json`, ForgeCode credentials), and
-the macOS keychain. Anthropic is the only provider that actively refreshes Forge
-OAuth tokens.
+the macOS keychain, but each non-env layer must be allowed by credential-source
+policy before it is read or refreshed. Environment variables remain explicit
+inputs, but borrowed OAuth values such as `CLAUDE_CODE_OAUTH_TOKEN` still require
+`allow_borrowed_oauth: true`.

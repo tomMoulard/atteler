@@ -4234,6 +4234,23 @@ func TestRegistry_CompleteRecordsRouteTelemetry(t *testing.T) {
 	assert.InDelta(t, 0.00042, obs.LastCost, 0.000000001)
 }
 
+func TestRegistry_RecordRouteFailureRedactsCredentialLikeErrors(t *testing.T) {
+	t.Parallel()
+
+	fakeKey := "sk-" + "routefailurecredential123456"
+
+	r := NewRegistry()
+	telemetry := modelroute.NewTelemetry()
+	r.SetRouteTelemetry(telemetry)
+
+	r.recordRouteFailure(providerOpenAI, "gpt-4.1-mini", errors.New("api_key="+fakeKey))
+
+	obs, ok := telemetry.Snapshot("openai/gpt-4.1-mini")
+	require.True(t, ok)
+	assert.Contains(t, obs.LastError, "[REDACTED]")
+	assert.NotContains(t, obs.LastError, fakeKey)
+}
+
 func TestRegistry_CompleteRecordsTelemetryForProviderReportedAlias(t *testing.T) {
 	t.Parallel()
 

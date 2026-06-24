@@ -137,7 +137,7 @@ func ProviderCompatibilityFor(providerName string) (ProviderCompatibilityRow, bo
 
 	switch providerName {
 	case providerAnthropic:
-		row.AuthSource = compatibilityCell("api-key/oauth", "`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, ForgeCode credentials, or borrowed Claude Code credentials")
+		row.AuthSource = compatibilityCell("api-key/oauth", "`ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` by default; `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode, and borrowed Claude Code stores only when credential policy allows borrowed OAuth")
 		row.ModelDiscovery = compatibilityCell("live+static", "`GET /v1/models` when registered; static fallback for offline known-models")
 		row.Completion = compatibilityCell("messages-api", "`POST /v1/messages` direct HTTPS")
 		row.ShellAccess = compatibilityCell("atteler-loop", "no provider subprocess or CLI; configured tool calls execute in Atteler's agent loop")
@@ -146,7 +146,7 @@ func ProviderCompatibilityFor(providerName string) (ProviderCompatibilityRow, bo
 		row.RetryBehavior = compatibilityCell("registry", "registry retries transient 429/5xx responses; adapter does not refresh on 401")
 		row.OfflineMode = compatibilityCell("metadata-only", "known providers/models/matrix work offline; completion and health require network credentials")
 	case providerClaudeCode:
-		row.AuthSource = compatibilityCell("borrowed-oauth", "Claude Code OAuth from macOS Keychain or `~/.claude/.credentials.json`")
+		row.AuthSource = compatibilityCell("borrowed-oauth", "Claude Code OAuth from macOS Keychain or `~/.claude/.credentials.json` when credential policy allows borrowed OAuth")
 		row.ModelDiscovery = compatibilityCell("static", "static Claude Code adapter catalog; no model-list network call")
 		row.Completion = compatibilityCell("messages-api", "`POST /v1/messages` direct HTTPS using Claude Code OAuth")
 		row.ShellAccess = compatibilityCell("atteler-loop", "does not run the Claude Code CLI; configured tool calls execute in Atteler's agent loop")
@@ -155,7 +155,7 @@ func ProviderCompatibilityFor(providerName string) (ProviderCompatibilityRow, bo
 		row.RetryBehavior = compatibilityCell("registry+oauth-refresh", "registry retries transient 429/5xx responses; adapter refreshes OAuth once after 401")
 		row.OfflineMode = compatibilityCell("local-auth+metadata", "static catalog and local credential checks work offline; completion requires network")
 	case providerCodex:
-		row.AuthSource = compatibilityCell("borrowed-chatgpt", "`$CODEX_HOME/auth.json` or `~/.codex/auth.json` in ChatGPT auth mode")
+		row.AuthSource = compatibilityCell("borrowed-chatgpt", "`$CODEX_HOME/auth.json` or `~/.codex/auth.json` in ChatGPT auth mode when credential policy allows borrowed OAuth")
 		row.ModelDiscovery = compatibilityCell("static+config", "static Codex catalog plus configured Codex model; no backend model-list endpoint")
 		row.Completion = compatibilityCell("responses-api", "`POST /responses` direct HTTPS to the ChatGPT Codex backend")
 		row.ShellAccess = compatibilityCell("atteler-loop", "does not run `codex exec`; configured tool calls execute in Atteler's agent loop")
@@ -173,7 +173,7 @@ func ProviderCompatibilityFor(providerName string) (ProviderCompatibilityRow, bo
 		row.RetryBehavior = compatibilityCell("registry", "registry retries transient 429/5xx responses from the daemon")
 		row.OfflineMode = compatibilityCell("local-daemon", "matrix and static known-models work offline; local completion needs a reachable daemon/model")
 	case providerOpenAI:
-		row.AuthSource = compatibilityCell("api-key", "`OPENAI_API_KEY` or the `OPENAI_API_KEY` field in Codex `auth.json`")
+		row.AuthSource = compatibilityCell("api-key", "`OPENAI_API_KEY` by default; the `OPENAI_API_KEY` field in Codex `auth.json` only when credential policy allows that store")
 		row.ModelDiscovery = compatibilityCell("live+static", "`GET /v1/models` when registered; static fallback for offline known-models")
 		row.Completion = compatibilityCell("chat-completions", "`POST /v1/chat/completions` direct HTTPS")
 		row.ShellAccess = compatibilityCell("atteler-loop", "no provider subprocess or CLI; configured tool calls execute in Atteler's agent loop")

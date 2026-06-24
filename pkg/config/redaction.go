@@ -33,6 +33,8 @@ func RedactedConfig(cfg Config) Config {
 		provider.ModelsPath = redactURL(provider.ModelsPath)
 		provider.Models = append([]string(nil), provider.Models...)
 		provider.Capabilities = append([]string(nil), provider.Capabilities...)
+		provider.CredentialPolicy.AllowedProviders = append([]string(nil), provider.CredentialPolicy.AllowedProviders...)
+		provider.CredentialPolicy.AllowedStores = append([]string(nil), provider.CredentialPolicy.AllowedStores...)
 		out.Providers[name] = provider
 	}
 

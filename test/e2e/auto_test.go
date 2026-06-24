@@ -129,6 +129,10 @@ default_model: claude-code/claude-opus-4-7
 providers:
   anthropic:
     disabled: true
+  claude-code:
+    credential_policy:
+      allowed_stores: [claude_code_file]
+      allow_borrowed_oauth: true
   codex:
     disabled: true
   ollama:
@@ -160,6 +164,7 @@ generation:
 			"ATTELER_OLLAMA_AUTO_START=false",
 		},
 	},
+		"--config", configPath,
 		"--auto", "--auto-max-depth", "2",
 		"--headless", "--autonomy", "high",
 		"--output", "json",

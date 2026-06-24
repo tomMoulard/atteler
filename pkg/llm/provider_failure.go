@@ -215,7 +215,9 @@ type openAIRegionalHostnameError struct {
 }
 
 func (e *openAIRegionalHostnameError) Error() string {
-	return e.wrapped.Error() + " (" + openAIRegionalHostnameSummary + "; " + openAIRegionalHostnameRemediation(e.wrapped.Error()) + ")"
+	message := RedactDiagnosticMessage(e.wrapped.Error())
+
+	return message + " (" + openAIRegionalHostnameSummary + "; " + openAIRegionalHostnameRemediation(message) + ")"
 }
 
 func (e *openAIRegionalHostnameError) Unwrap() error {

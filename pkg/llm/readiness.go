@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sort"
@@ -109,6 +110,7 @@ type providerHealthCacheEntry struct {
 }
 
 func cloneProviderModelCatalog(c ProviderModelCatalog) ProviderModelCatalog {
+	c.Error = redactDiagnosticError(c.Error)
 	c.Models = append([]string(nil), c.Models...)
 	c.StaticModels = append([]string(nil), c.StaticModels...)
 
@@ -121,6 +123,9 @@ func cloneProviderModelCatalog(c ProviderModelCatalog) ProviderModelCatalog {
 }
 
 func cloneProviderReadiness(p ProviderReadiness) ProviderReadiness {
+	p.Error = redactDiagnosticError(p.Error)
+	p.HealthError = redactDiagnosticError(p.HealthError)
+	p.ModelFetchError = redactDiagnosticError(p.ModelFetchError)
 	p.Models = append([]string(nil), p.Models...)
 	p.StaticModels = append([]string(nil), p.StaticModels...)
 	p.LiveModels = append([]string(nil), p.LiveModels...)
@@ -129,12 +134,78 @@ func cloneProviderReadiness(p ProviderReadiness) ProviderReadiness {
 }
 
 func cloneProviderReadinessReport(report ProviderReadinessReport) ProviderReadinessReport {
+	report.Default.ProviderError = redactDiagnosticError(report.Default.ProviderError)
+	report.Default.ModelError = redactDiagnosticError(report.Default.ModelError)
+
 	report.Providers = append([]ProviderReadiness(nil), report.Providers...)
 	for i := range report.Providers {
 		report.Providers[i] = cloneProviderReadiness(report.Providers[i])
 	}
 
 	return report
+}
+
+type redactedDiagnosticError string
+
+func (e redactedDiagnosticError) Error() string {
+	return string(e)
+}
+
+func redactDiagnosticError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		redacted := *providerErr
+		redacted.Provider = RedactDiagnosticMessage(redacted.Provider)
+		redacted.Message = RedactDiagnosticMessage(redacted.Message)
+		redacted.RequestID = RedactDiagnosticMessage(redacted.RequestID)
+
+		return &redacted
+	}
+
+	message := err.Error()
+
+	redacted := RedactDiagnosticMessage(message)
+	if redacted == message {
+		return err
+	}
+
+	return redactedDiagnosticError(redacted)
+}
+
+func redactReadinessChecks(checks []ReadinessCheck) []ReadinessCheck {
+	out := append([]ReadinessCheck(nil), checks...)
+	for i := range out {
+		out[i].Detail = RedactDiagnosticMessage(out[i].Detail)
+	}
+
+	return out
+}
+
+func redactDiagnosticStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	for i := range out {
+		out[i] = RedactDiagnosticMessage(out[i])
+	}
+
+	return out
+}
+
+func redactAdapterContract(contract AdapterContract) AdapterContract {
+	contract.Provider = RedactDiagnosticMessage(contract.Provider)
+	contract.AdapterVersion = RedactDiagnosticMessage(contract.AdapterVersion)
+	contract.SourceCLI = RedactDiagnosticMessage(contract.SourceCLI)
+	contract.SourceCLIVersion = RedactDiagnosticMessage(contract.SourceCLIVersion)
+	contract.Protocol = RedactDiagnosticMessage(contract.Protocol)
+	contract.Credential = RedactDiagnosticMessage(contract.Credential)
+	contract.KillSwitches = redactDiagnosticStrings(contract.KillSwitches)
+	contract.ReviewedAt = RedactDiagnosticMessage(contract.ReviewedAt)
+	contract.ReviewAfter = RedactDiagnosticMessage(contract.ReviewAfter)
+
+	return contract
 }
 
 func (r *Registry) setStaticProviderCatalogLocked(providerName string, models []string) {
@@ -708,14 +779,16 @@ func (r *Registry) applyHealthToReadinessLocked(providerName string, health Prov
 }
 
 func cloneProviderHealth(health ProviderHealth) ProviderHealth {
+	health.Error = redactDiagnosticError(health.Error)
+	health.ModelFetchError = redactDiagnosticError(health.ModelFetchError)
 	health.Models = append([]string(nil), health.Models...)
 	health.StaticModels = append([]string(nil), health.StaticModels...)
 	health.LiveModels = append([]string(nil), health.LiveModels...)
-	health.Checks = append([]ReadinessCheck(nil), health.Checks...)
-	health.Warnings = append([]string(nil), health.Warnings...)
+	health.Checks = redactReadinessChecks(health.Checks)
+	health.Warnings = redactDiagnosticStrings(health.Warnings)
 
 	if health.Contract != nil {
-		contract := *health.Contract
+		contract := redactAdapterContract(*health.Contract)
 		health.Contract = &contract
 	}
 
@@ -896,7 +969,7 @@ func shortError(err error) string {
 		return ""
 	}
 
-	msg := strings.TrimSpace(err.Error())
+	msg := strings.TrimSpace(RedactDiagnosticMessage(err.Error()))
 
 	const maxErrorLen = 160
 	if len(msg) > maxErrorLen {

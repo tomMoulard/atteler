@@ -74,7 +74,7 @@ type RetryError struct {
 // Error returns a compact retry summary followed by the final provider error.
 func (e *RetryError) Error() string {
 	if e == nil {
-		return "<nil>"
+		return nilErrorMessage
 	}
 
 	subject := retrySubject(e.Provider, e.Model)
@@ -86,7 +86,12 @@ func (e *RetryError) Error() string {
 
 	requestID := ""
 	if e.RequestID != "" {
-		requestID = ", request_id=" + e.RequestID
+		requestID = ", request_id=" + RedactDiagnosticMessage(e.RequestID)
+	}
+
+	errText := nilErrorMessage
+	if e.Err != nil {
+		errText = e.Err.Error()
 	}
 
 	return fmt.Sprintf(
@@ -100,7 +105,7 @@ func (e *RetryError) Error() string {
 		e.Elapsed.Round(time.Millisecond),
 		status,
 		requestID,
-		e.Err,
+		RedactDiagnosticMessage(errText),
 	)
 }
 

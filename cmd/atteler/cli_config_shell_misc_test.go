@@ -188,6 +188,57 @@ func TestLLMConfigCarriesProviderRetryPolicy(t *testing.T) {
 	assert.InEpsilon(t, jitterFraction, *provider.Retry.JitterFraction, 0.0001)
 }
 
+func TestLLMConfigPreservesExplicitFalseCredentialPolicy(t *testing.T) {
+	t.Parallel()
+
+	got := llmConfig(appconfig.Config{
+		Providers: map[string]appconfig.ProviderConfig{
+			"codex": {
+				CredentialPolicy: appconfig.CredentialPolicyConfig{
+					Configured:            true,
+					AllowBorrowedOAuthSet: true,
+					AllowRefreshSet:       true,
+					AllowWriteBackSet:     true,
+					AllowBorrowedOAuth:    false,
+					AllowRefresh:          false,
+					AllowWriteBack:        false,
+				},
+			},
+		},
+	}, "", nil, "", nil)
+
+	policy := got.Providers["codex"].CredentialPolicy
+	assert.True(t, policy.Configured)
+	assert.False(t, policy.AllowBorrowedOAuth)
+	assert.False(t, policy.AllowRefresh)
+	assert.False(t, policy.AllowWriteBack)
+}
+
+func TestLLMConfigPreservesExplicitEmptyCredentialPolicyLists(t *testing.T) {
+	t.Parallel()
+
+	got := llmConfig(appconfig.Config{
+		Providers: map[string]appconfig.ProviderConfig{
+			"codex": {
+				CredentialPolicy: appconfig.CredentialPolicyConfig{
+					Configured:          true,
+					AllowedProviders:    []string{},
+					AllowedProvidersSet: true,
+					AllowedStores:       []string{},
+					AllowedStoresSet:    true,
+				},
+			},
+		},
+	}, "", nil, "", nil)
+
+	policy := got.Providers["codex"].CredentialPolicy
+	assert.True(t, policy.Configured)
+	assert.Empty(t, policy.AllowedProviders)
+	assert.True(t, policy.AllowedProvidersSet)
+	assert.Empty(t, policy.AllowedStores)
+	assert.True(t, policy.AllowedStoresSet)
+}
+
 func TestRetryPolicyInfoForConfig_AppliesOverridesAndNormalization(t *testing.T) {
 	t.Parallel()
 

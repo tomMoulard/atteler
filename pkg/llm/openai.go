@@ -80,7 +80,7 @@ func NewOpenAIProviderWithConfig(_ ProviderConfig) (*OpenAIProvider, error) {
 // ResolveOpenAIKeyContext and optional config values. OPENAI_BASE_URL overrides
 // cfg.BaseURL.
 func NewOpenAIProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) (*OpenAIProvider, error) {
-	key, bearer, err := ResolveOpenAIKeyContext(ctx)
+	key, bearer, err := ResolveOpenAIKeyWithConfigContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func NewOpenAICompatibleProviderWithConfigContext(ctx context.Context, name stri
 		return nil, err
 	}
 
-	apiKey, err := openAICompatibleAPIKey(ctx, name, cfg.APIKeyEnv)
+	apiKey, err := openAICompatibleAPIKey(ctx, name, cfg.APIKeyEnv, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +277,7 @@ func normalizeOpenAIProviderType(providerType string) string {
 	}
 }
 
-func openAICompatibleAPIKey(ctx context.Context, providerName, envName string) (string, error) {
+func openAICompatibleAPIKey(ctx context.Context, providerName, envName string, cfg ProviderConfig) (string, error) {
 	if err := requireCredentialContext(ctx); err != nil {
 		return "", err
 	}
@@ -290,6 +290,14 @@ func openAICompatibleAPIKey(ctx context.Context, providerName, envName string) (
 	value := strings.TrimSpace(os.Getenv(envName))
 	if value == "" {
 		return "", fmt.Errorf("openai-compatible: provider %q has no credentials: set %s", providerName, envName)
+	}
+
+	if err := authorizeCredentialSourcePolicy(ctx, cfg, credentialSource{
+		Provider:    providerName,
+		Store:       CredentialStoreEnv,
+		Description: envName,
+	}, credentialActionUse); err != nil {
+		return "", err
 	}
 
 	return value, nil

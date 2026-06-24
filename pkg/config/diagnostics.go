@@ -479,7 +479,7 @@ func inspectConfigNode(path string, root *yaml.Node) []Diagnostic {
 		case "context":
 			diagnostics = append(diagnostics, inspectContextFields(path, value)...)
 		case "providers":
-			diagnostics = append(diagnostics, inspectMapEntries(path, "providers", value, knownProviderFields())...)
+			diagnostics = append(diagnostics, inspectProviders(path, value)...)
 		case "agents":
 			diagnostics = append(diagnostics, inspectAgents(path, value)...)
 		case "hooks":
@@ -997,16 +997,19 @@ func inspectModelRoles(path string, value *yaml.Node) []Diagnostic {
 	return diagnostics
 }
 
-func inspectMapEntries(
-	path string,
-	prefix string,
-	value *yaml.Node,
-	known map[string]bool,
-) []Diagnostic {
+func inspectProviders(path string, value *yaml.Node) []Diagnostic {
 	var diagnostics []Diagnostic
 
 	forEachMappingField(value, func(name string, entry *yaml.Node) {
-		diagnostics = append(diagnostics, inspectNamedFields(path, prefix+"."+name, entry, known, nil)...)
+		prefix := "providers." + name
+
+		diagnostics = append(diagnostics, inspectNamedFields(path, prefix, entry, knownProviderFields(), nil)...)
+		if policy := mappingValue(entry, "credential_policy"); policy != nil {
+			diagnostics = append(
+				diagnostics,
+				inspectNamedFields(path, prefix+".credential_policy", policy, knownCredentialPolicyFields(), nil)...,
+			)
+		}
 	})
 
 	return diagnostics
@@ -1201,8 +1204,19 @@ func knownProviderFields() map[string]bool {
 		"local":                   true,
 		"auto_start":              true,
 		"disable_private_adapter": true,
+		"credential_policy":       true,
 		"retry":                   true,
 		"timeout_seconds":         true,
+	}
+}
+
+func knownCredentialPolicyFields() map[string]bool {
+	return map[string]bool{
+		"allowed_providers":    true,
+		"allowed_stores":       true,
+		"allow_borrowed_oauth": true,
+		"allow_refresh":        true,
+		"allow_write_back":     true,
 	}
 }
 

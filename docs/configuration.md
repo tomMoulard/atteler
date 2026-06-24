@@ -150,6 +150,12 @@ providers:
     models: []                                  # default: [] (use built-in catalog)
     capabilities: []                            # default: [] (inferred from provider)
     timeout_seconds: 120                        # default: 120
+    credential_policy:                          # default: env-only credentials
+      allowed_providers: []                     # default: [] (any provider)
+      allowed_stores: [env]                     # default: [env]
+      allow_borrowed_oauth: false               # default: false
+      allow_refresh: false                      # default: false
+      allow_write_back: false                   # default: false
     retry:
       max_attempts: 2                           # default: 2 (0 disables)
       initial_backoff_ms: 1000                  # default: 1000
@@ -272,6 +278,44 @@ providers:
   azure:
     api_key_scheme: ""   # send the raw key with no prefix
 ```
+
+#### `credential_policy`
+
+Controls which credential sources Atteler may use for a provider. Environment
+credentials are allowed by default. Borrowed OAuth stores from other CLIs
+(Codex, Claude Code, ForgeCode) must be explicitly allowed before Atteler reads
+them, refreshes them, or writes refreshed tokens back.
+
+```yaml
+providers:
+  codex:
+    credential_policy:
+      allowed_stores: [codex_auth_json]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+  claude-code:
+    credential_policy:
+      allowed_stores: [claude_code_keychain, claude_code_file]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+  anthropic:
+    credential_policy:
+      allowed_stores: [env, forge_credentials, claude_code_keychain, claude_code_file]
+      allow_borrowed_oauth: true
+      allow_refresh: true
+      allow_write_back: true
+```
+
+Supported stores are `env`, `forge_credentials`, `claude_code_keychain`,
+`claude_code_file`, and `codex_auth_json`. `allowed_providers` narrows the
+resolved provider name for the policy (for example `anthropic`, `codex`, or
+`openai`); external CLI ownership is gated by `allowed_stores` and
+`allow_borrowed_oauth`. Borrowed OAuth values still require
+`allow_borrowed_oauth: true` even when they arrive via the `env` store, such as
+`CLAUDE_CODE_OAUTH_TOKEN`. Omitting `allowed_stores` keeps the default
+env-only behavior; setting `allowed_stores: []` is an explicit deny-all.
 
 #### `chat_completions_path`
 

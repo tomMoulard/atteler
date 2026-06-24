@@ -176,8 +176,11 @@ contract that routes the commands.
 The five built-in providers sit behind one stateless `Provider` interface
 (`pkg/llm`). The `codex` and `claude-code` providers reuse those subscriptions
 by borrowing their stored credentials, but make **direct HTTPS calls** from
-atteler — they do not run the vendor CLIs. Full credential, endpoint, and
-trust-boundary details are on the **[Providers](docs/providers.md)** page.
+atteler — they do not run the vendor CLIs. Because those stores are a security
+boundary, Atteler uses env-var credentials by default and requires explicit
+`credential_policy` opt-in before reading, refreshing, or writing back another
+CLI's OAuth session. Full credential, endpoint, and trust-boundary details are
+on the **[Providers](docs/providers.md)** page.
 
 ### Provider runtime contracts
 
@@ -191,8 +194,8 @@ health check, or model inventory with
 #### `anthropic`
 
 - Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API.
-- Credential source: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), then Claude Code keychain or `~/.claude/.credentials.json`.
-- Token refresh: ForgeCode OAuth credentials may refresh during credential resolution; the Anthropic adapter itself does not refresh on 401.
+- Credential source: `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` env vars by default; `CLAUDE_CODE_OAUTH_TOKEN` env var, ForgeCode credential files (`$FORGE_CONFIG/.credentials.json`, `~/forge/.credentials.json`, `~/.forge/.credentials.json`), and Claude Code keychain/`~/.claude/.credentials.json` only when credential policy allows borrowing those OAuth sessions.
+- Token refresh: ForgeCode OAuth credentials refresh during credential resolution only when `credential_policy.allow_refresh` and `allow_write_back` allow it; the Anthropic adapter itself does not refresh on 401.
 - Network endpoint: `ANTHROPIC_BASE_URL` or provider config, default `https://api.anthropic.com`; `POST /v1/messages` for completions and `GET /v1/models` for model/health checks.
 - Sandbox and tools: No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep tool definitions in the Messages request; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static `Models()` fallback without credentials; registered providers can fetch live models with `GET /v1/models`.
@@ -201,8 +204,8 @@ health check, or model inventory with
 #### `claude-code`
 
 - Execution path: Direct HTTPS calls from atteler to the Anthropic Messages API using Claude Code OAuth; it does not run the Claude Code CLI in print mode.
-- Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json`.
-- Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store.
+- Credential source: Claude Code OAuth from macOS Keychain `Claude Code-credentials` or `~/.claude/.credentials.json` only when `credential_policy.allowed_stores` and `allow_borrowed_oauth` allow borrowing that session.
+- Token refresh: On 401, exchanges the stored refresh token at `https://platform.claude.com/v1/oauth/token` and persists refreshed tokens back to the same Claude Code credential store only when `credential_policy.allow_refresh` and `allow_write_back` allow it.
 - Network endpoint: `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`; `POST /v1/messages` for completions. Model listing is static for this provider.
 - Sandbox and tools: No Claude Code subprocess or Claude Code workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing and `FetchModels` both return the static Claude Code model/alias catalog; no model-list network call is made.
@@ -211,8 +214,8 @@ health check, or model inventory with
 #### `codex`
 
 - Execution path: Direct HTTPS Responses request from atteler to the ChatGPT Codex backend; it does not run `codex exec`.
-- Credential source: `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens.
-- Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json`.
+- Credential source: `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in `auth_mode=chatgpt` with ChatGPT access and refresh tokens only when `credential_policy.allowed_stores` includes `codex_auth_json` and `allow_borrowed_oauth` is true.
+- Token refresh: On 401, exchanges the stored refresh token at `https://auth.openai.com/oauth/token` and atomically updates `auth.json` only when `credential_policy.allow_refresh` and `allow_write_back` allow it.
 - Network endpoint: `CODEX_BASE_URL`, default `https://chatgpt.com/backend-api/codex`; `POST /responses` for completions. Model listing is static plus any model from Codex config.
 - Sandbox and tools: No Codex subprocess or Codex CLI workspace sandbox. Atteler can send configured bash/read/write/edit/glob/grep function-tool definitions; tool execution happens in Atteler's agent loop.
 - Model inventory: Known-model listing prints the static Codex catalog; registered providers prepend any model configured in Codex config and `FetchModels` stays local.
@@ -231,7 +234,7 @@ health check, or model inventory with
 #### `openai`
 
 - Execution path: Direct HTTPS calls from atteler to the OpenAI Chat Completions API.
-- Credential source: `OPENAI_API_KEY`, then the `OPENAI_API_KEY` field in `~/.codex/auth.json`.
+- Credential source: `OPENAI_API_KEY` by default, then the `OPENAI_API_KEY` field in `~/.codex/auth.json` only when `credential_policy.allowed_stores` includes `codex_auth_json`.
 - Token refresh: None; the API key is sent as a bearer token and is not refreshed.
 - Network endpoint: `OPENAI_BASE_URL` or provider config, default `https://api.openai.com`; `POST /v1/chat/completions` for completions and `GET /v1/models` for model/health checks.
 - Sandbox and tools: No subprocess or workspace sandbox. Atteler sends configured bash/read/write/edit/glob/grep function-tool definitions in the chat request; tool execution happens in Atteler's agent loop.
@@ -250,7 +253,7 @@ and checked by `go test ./pkg/llm`. It is credential-free and should match what
 <!-- BEGIN GENERATED PROVIDER COMPATIBILITY MATRIX -->
 | Dimension | `anthropic` | `claude-code` | `codex` | `ollama` | `openai` |
 | --- | --- | --- | --- | --- | --- |
-| `auth_source` | api-key/oauth — `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`, ForgeCode credentials, or borrowed Claude Code credentials | borrowed-oauth — Claude Code OAuth from macOS Keychain or `~/.claude/.credentials.json` | borrowed-chatgpt — `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in ChatGPT auth mode | none — no API credential is used by the built-in adapter | api-key — `OPENAI_API_KEY` or the `OPENAI_API_KEY` field in Codex `auth.json` |
+| `auth_source` | api-key/oauth — `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` by default; `CLAUDE_CODE_OAUTH_TOKEN`, ForgeCode, and borrowed Claude Code stores only when credential policy allows borrowed OAuth | borrowed-oauth — Claude Code OAuth from macOS Keychain or `~/.claude/.credentials.json` when credential policy allows borrowed OAuth | borrowed-chatgpt — `$CODEX_HOME/auth.json` or `~/.codex/auth.json` in ChatGPT auth mode when credential policy allows borrowed OAuth | none — no API credential is used by the built-in adapter | api-key — `OPENAI_API_KEY` by default; the `OPENAI_API_KEY` field in Codex `auth.json` only when credential policy allows that store |
 | `model_discovery` | live+static — `GET /v1/models` when registered; static fallback for offline known-models | static — static Claude Code adapter catalog; no model-list network call | static+config — static Codex catalog plus configured Codex model; no backend model-list endpoint | local-live+static — `GET /api/tags` against the configured daemon; static fallback for offline known-models | live+static — `GET /v1/models` when registered; static fallback for offline known-models |
 | `completion` | messages-api — `POST /v1/messages` direct HTTPS | messages-api — `POST /v1/messages` direct HTTPS using Claude Code OAuth | responses-api — `POST /responses` direct HTTPS to the ChatGPT Codex backend | ollama-chat — `POST /api/chat` against a local or configured Ollama daemon | chat-completions — `POST /v1/chat/completions` direct HTTPS |
 | `streaming` | unsupported — no caller-facing streaming provider | unsupported — no caller-facing streaming provider | supported — llm.StreamProvider implementation | supported — llm.StreamProvider implementation | unsupported — no caller-facing streaming provider |

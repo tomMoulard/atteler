@@ -84,7 +84,7 @@ func NewCodexProviderWithConfigContext(ctx context.Context, cfg ProviderConfig) 
 		return nil, errors.New("codex private adapter disabled")
 	}
 
-	auth, err := loadCodexChatGPTAuthContext(ctx, codexConfigDir())
+	auth, err := loadCodexChatGPTAuthWithConfigContext(ctx, codexConfigDir(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("no Codex credentials found: %w (run `codex login`)", err)
 	}
@@ -143,6 +143,16 @@ func (c *CodexProvider) AdapterDiagnostics() AdapterDiagnostics {
 			Detail: readinessDetail(c.auth != nil && c.auth.hasRefreshToken(), "refresh_token available for one retry after HTTP 401", "missing refresh_token; adapter cannot recover from expired access tokens"),
 		},
 		{
+			Name:   "credential_provenance",
+			Status: readinessStatus(c.auth != nil),
+			Detail: codexCredentialProvenanceDetail(c.auth),
+		},
+		{
+			Name:   "credential_policy",
+			Status: ReadinessWarning,
+			Detail: codexCredentialPolicyDetail(c.auth),
+		},
+		{
 			Name:   "network_reachability",
 			Status: ReadinessSkipped,
 			Detail: "not probed during doctor; private ChatGPT Codex backend is verified only by a completion request",
@@ -170,6 +180,22 @@ func (c *CodexProvider) AdapterDiagnostics() AdapterDiagnostics {
 		},
 		Models: c.Models(),
 	}
+}
+
+func codexCredentialProvenanceDetail(auth *codexChatGPTAuth) string {
+	if auth == nil {
+		return "no Codex credential source loaded"
+	}
+
+	return auth.source.detail()
+}
+
+func codexCredentialPolicyDetail(auth *codexChatGPTAuth) string {
+	if auth == nil {
+		return credentialPolicySummary(CredentialSourcePolicy{})
+	}
+
+	return credentialPolicySummary(auth.credentialPolicy)
 }
 
 // ProviderModelsVerified reports whether FetchModels is an authoritative live
