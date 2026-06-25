@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,10 @@ func TestCredentialSourcePolicyErrorRedactsSecretLocationAndAudit(t *testing.T) 
 	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
 
 	secretPath := filepath.Join(t.TempDir(), "api_key=super-secret-token", "auth.json")
-	err := authorizeCredentialSourcePolicy(ctx, ProviderConfig{}, credentialSource{
+	// An explicit deny-all policy still rejects the borrowed Codex store even
+	// though the default policy now borrows it; the denial path is what redacts.
+	denyAll := ProviderConfig{CredentialPolicy: CredentialSourcePolicy{Configured: true, AllowedStoresSet: true}}
+	err := authorizeCredentialSourcePolicy(ctx, denyAll, credentialSource{
 		Provider:   providerCodex,
 		Store:      CredentialStoreCodexAuthJSON,
 		Location:   secretPath,
@@ -193,6 +197,10 @@ func TestCredentialPolicySummaryDefaultsOnlyWhenListsUnset(t *testing.T) {
 
 	summary := credentialPolicySummary(CredentialSourcePolicy{})
 
+	// The default borrows the known local stores out of the box.
 	assert.Contains(t, summary, "allowed_providers=*")
-	assert.Contains(t, summary, "allowed_stores=env")
+	assert.Contains(t, summary, "allowed_stores="+strings.Join(defaultAllowedCredentialStores(), ","))
+	assert.Contains(t, summary, "allow_borrowed_oauth=true")
+	assert.Contains(t, summary, "allow_refresh=true")
+	assert.Contains(t, summary, "allow_write_back=true")
 }

@@ -23,19 +23,23 @@ the macOS keychain or `~/.claude/.credentials.json`; the ChatGPT auth in
 Codex Responses backend. There is no subprocess, CLI tool sandbox, or workspace
 sandbox; atteler only forwards the tool definitions configured for the request.
 
-Borrowed/local CLI credential stores are a trust boundary, not just a
-convenience fallback. By default Atteler only uses provider credentials supplied
-through environment variables. To let a provider read another CLI's credential
-store, configure the provider's `credential_policy` explicitly:
+Borrowed/local CLI credential stores are a trust boundary. By default Atteler
+borrows the well-known local stores it can find — `env`, `codex_auth_json`,
+`claude_code_keychain`, `claude_code_file`, and `forge_credentials` — and may
+read, use, refresh, and write them back, so it reuses your existing
+Codex/Claude Code/ForgeCode subscriptions out of the box. Stores outside that
+list and the `*` wildcard still require an explicit opt-in.
+
+To lock a provider down, configure its `credential_policy` explicitly. A
+configured policy replaces the default rather than extending it, so any field
+you omit reverts to its conservative zero value (for example
+`allow_borrowed_oauth: false`):
 
 ```yaml
 providers:
   codex:
     credential_policy:
-      allowed_stores: [codex_auth_json]
-      allow_borrowed_oauth: true
-      allow_refresh: true
-      allow_write_back: true
+      allowed_stores: [env]                 # stop borrowing ~/.codex/auth.json
   claude-code:
     credential_policy:
       allowed_stores: [claude_code_keychain, claude_code_file]
@@ -53,8 +57,8 @@ providers:
 `allowed_providers` can further narrow a policy to resolved provider names
 (for example `anthropic`, `codex`, or `openai`). External CLI ownership remains
 controlled by `allowed_stores` plus `allow_borrowed_oauth`. Omitting
-`allowed_stores` keeps env-only credentials available; `allowed_stores: []`
-intentionally denies every credential store.
+`credential_policy` entirely keeps the borrow default; `allowed_stores: []` on a
+configured policy intentionally denies every credential store.
 Refresh/write-back attempts, failures, and CAS-conflict events are recorded in
 `credential_events.jsonl` under `ATTELER_COMMAND_AUDIT_DIR` (or the default
 temporary audit directory), alongside the side-effect permission ledger, with

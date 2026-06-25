@@ -59,8 +59,13 @@ const claudeCodeKeychainSource = "keychain:" + keychainService
 // whether borrowed OAuth sessions may be refreshed or written back to their
 // owning CLI's credential store.
 //
-// The zero value is intentionally conservative: environment variables are
-// allowed, but borrowed/local CLI stores, refresh, and write-back are denied.
+// When a provider has no explicit credential_policy configured,
+// defaultCredentialSourcePolicy applies: Atteler borrows the well-known local
+// credential stores out of the box (see defaultAllowedCredentialStores) and may
+// refresh/write them back. Unknown stores and the "*" wildcard are still not
+// auto-allowed. The struct zero value, by contrast, is intentionally
+// conservative — it is what an explicitly configured policy that omits fields
+// denies: borrowed OAuth, refresh, and write-back are all off.
 type CredentialSourcePolicy struct {
 	AllowedProviders    []string `json:"allowed_providers,omitempty" yaml:"allowed_providers,omitempty"`
 	AllowedStores       []string `json:"allowed_stores,omitempty" yaml:"allowed_stores,omitempty"`
@@ -162,8 +167,31 @@ func containsCredentialSourcePolicyError(err error) bool {
 	return errors.As(err, &policyErr)
 }
 
+// defaultAllowedCredentialStores are the well-known local credential stores
+// Atteler borrows from sibling CLIs out of the box when no credential_policy is
+// configured. The "*" wildcard and any store not listed here still require an
+// explicit opt-in (config credential_policy or ATTELER_TRUST_BORROWED_CREDENTIALS).
+func defaultAllowedCredentialStores() []string {
+	return []string{
+		CredentialStoreEnv,
+		CredentialStoreCodexAuthJSON,
+		CredentialStoreClaudeCodeKeychain,
+		CredentialStoreClaudeCodeFile,
+		CredentialStoreForgeCredentials,
+	}
+}
+
 func defaultCredentialSourcePolicy() CredentialSourcePolicy {
-	policy := CredentialSourcePolicy{AllowedStores: []string{CredentialStoreEnv}}
+	// By default Atteler reuses the local CLI subscriptions it can find: it may
+	// read, use, refresh, and write back the known borrowed stores. Lock this
+	// down with an explicit providers.<name>.credential_policy (for example
+	// allowed_stores: [env]) or disable_private_adapter.
+	policy := CredentialSourcePolicy{
+		AllowedStores:      defaultAllowedCredentialStores(),
+		AllowBorrowedOAuth: true,
+		AllowRefresh:       true,
+		AllowWriteBack:     true,
+	}
 
 	if providers := splitCredentialPolicyList(os.Getenv(envCredentialAllowedProviders)); len(providers) > 0 {
 		policy.AllowedProviders = providers
@@ -207,7 +235,7 @@ func credentialPolicyForProvider(ctx context.Context, cfg ProviderConfig) Creden
 	}
 
 	if len(policy.AllowedStores) == 0 && !policy.AllowedStoresSet && policy.AllowedStores == nil {
-		policy.AllowedStores = []string{CredentialStoreEnv}
+		policy.AllowedStores = defaultAllowedCredentialStores()
 	}
 
 	return policy
@@ -261,7 +289,7 @@ func normalizeCredentialSourcePolicy(policy CredentialSourcePolicy) normalizedCr
 
 	stores := policy.AllowedStores
 	if len(stores) == 0 && !policy.AllowedStoresSet && stores == nil {
-		stores = []string{CredentialStoreEnv}
+		stores = defaultAllowedCredentialStores()
 	}
 
 	for _, store := range stores {
@@ -597,7 +625,7 @@ func credentialPolicySummary(policy CredentialSourcePolicy) string {
 	return fmt.Sprintf(
 		"allowed_providers=%s allowed_stores=%s allow_borrowed_oauth=%t allow_refresh=%t allow_write_back=%t",
 		credentialPolicyListSummary(policy.AllowedProviders, policy.AllowedProvidersSet, "*"),
-		credentialPolicyListSummary(policy.AllowedStores, policy.AllowedStoresSet, CredentialStoreEnv),
+		credentialPolicyListSummary(policy.AllowedStores, policy.AllowedStoresSet, strings.Join(defaultAllowedCredentialStores(), ",")),
 		policy.AllowBorrowedOAuth,
 		policy.AllowRefresh,
 		policy.AllowWriteBack,

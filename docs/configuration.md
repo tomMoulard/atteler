@@ -153,12 +153,12 @@ providers:
     models: []                                  # default: [] (use built-in catalog)
     capabilities: []                            # default: [] (inferred from provider)
     timeout_seconds: 120                        # default: 120
-    credential_policy:                          # default: env-only credentials
+    credential_policy:                          # default: borrow known local stores
       allowed_providers: []                     # default: [] (any provider)
-      allowed_stores: [env]                     # default: [env]
-      allow_borrowed_oauth: false               # default: false
-      allow_refresh: false                      # default: false
-      allow_write_back: false                   # default: false
+      allowed_stores: [env, codex_auth_json, claude_code_keychain, claude_code_file, forge_credentials] # default: known borrowed stores
+      allow_borrowed_oauth: true                # default: true
+      allow_refresh: true                       # default: true
+      allow_write_back: true                    # default: true
     retry:
       max_attempts: 2                           # default: 2 (0 disables)
       initial_backoff_ms: 1000                  # default: 1000
@@ -284,19 +284,24 @@ providers:
 
 #### `credential_policy`
 
-Controls which credential sources Atteler may use for a provider. Environment
-credentials are allowed by default. Borrowed OAuth stores from other CLIs
-(Codex, Claude Code, ForgeCode) must be explicitly allowed before Atteler reads
-them, refreshes them, or writes refreshed tokens back.
+Controls which credential sources Atteler may use for a provider. By default
+Atteler borrows the well-known local credential stores it can find — `env`,
+`codex_auth_json`, `claude_code_keychain`, `claude_code_file`, and
+`forge_credentials` — and may read, use, refresh, and write them back, so it
+reuses your existing Codex/Claude Code/ForgeCode subscriptions out of the box.
+Stores outside that list and the `*` wildcard still require an explicit opt-in.
+
+To lock a provider down, configure an explicit `credential_policy`. A configured
+policy replaces the default rather than extending it, and any field you omit
+falls back to its conservative zero value (`allow_borrowed_oauth`,
+`allow_refresh`, and `allow_write_back` default to `false` once you configure the
+block):
 
 ```yaml
 providers:
   codex:
     credential_policy:
-      allowed_stores: [codex_auth_json]
-      allow_borrowed_oauth: true
-      allow_refresh: true
-      allow_write_back: true
+      allowed_stores: [env]                 # do not borrow ~/.codex/auth.json
   claude-code:
     credential_policy:
       allowed_stores: [claude_code_keychain, claude_code_file]
@@ -317,8 +322,12 @@ resolved provider name for the policy (for example `anthropic`, `codex`, or
 `openai`); external CLI ownership is gated by `allowed_stores` and
 `allow_borrowed_oauth`. Borrowed OAuth values still require
 `allow_borrowed_oauth: true` even when they arrive via the `env` store, such as
-`CLAUDE_CODE_OAUTH_TOKEN`. Omitting `allowed_stores` keeps the default
-env-only behavior; setting `allowed_stores: []` is an explicit deny-all.
+`CLAUDE_CODE_OAUTH_TOKEN` (it is on by default but off once you configure a
+policy that omits it). Omitting `credential_policy` entirely keeps the borrow
+default; setting `allowed_stores: []` on a configured policy is an explicit
+deny-all. Set `ATTELER_TRUST_BORROWED_CREDENTIALS=1` to widen the default to all
+stores (`*`), or `ATTELER_DISABLE_PRIVATE_ADAPTERS=1` /
+`disable_private_adapter` to turn borrowing off entirely.
 Refresh/write-back attempts, failures, and CAS-conflict decisions are written to
 `credential_events.jsonl` under `ATTELER_COMMAND_AUDIT_DIR` (or the default
 temporary audit directory) with redacted locations and hashed identifiers.

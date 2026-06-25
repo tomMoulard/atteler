@@ -87,6 +87,14 @@ func TestResolveAnthropicKey_ClaudeCodeOAuthEnvRequiresBorrowedOAuthPolicy(t *te
 
 	auditDir := t.TempDir()
 	ctx := permission.ContextWithAuditDir(context.Background(), auditDir)
+	// Pin a policy that allows the env store but withholds borrowed OAuth, so the
+	// env-borrowed CLAUDE_CODE_OAUTH_TOKEN is still gated even though the default
+	// policy borrows it.
+	ctx = ContextWithCredentialSourcePolicy(ctx, CredentialSourcePolicy{
+		Configured:       true,
+		AllowedStores:    []string{CredentialStoreEnv},
+		AllowedStoresSet: true,
+	})
 
 	_, _, err := ResolveAnthropicKeyContext(ctx)
 	require.Error(t, err)
@@ -1065,7 +1073,14 @@ func TestResolveOpenAIKey_CredentialSourcePolicyDeniesCodexAuthJSON(t *testing.T
 	require.NoError(t, os.MkdirAll(codexDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(`{"OPENAI_API_KEY":"sk-from-codex"}`), 0o600))
 
-	_, _, err := ResolveOpenAIKeyContext(context.Background())
+	// Restrict to the env store so the borrowed Codex auth.json is denied even
+	// though the default policy now borrows it.
+	ctx := ContextWithCredentialSourcePolicy(context.Background(), CredentialSourcePolicy{
+		AllowedStores:    []string{CredentialStoreEnv},
+		AllowedStoresSet: true,
+	})
+
+	_, _, err := ResolveOpenAIKeyContext(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential source policy denied")
 	assert.Contains(t, err.Error(), CredentialStoreCodexAuthJSON)
