@@ -420,6 +420,14 @@ type model struct {
 	checkpointKind       agentLoopConfirmKind
 	pinnedMessages       map[int]bool
 	executionMode        string
+
+	// streamLineBuffer holds the not-yet-newline-terminated tail of streamed
+	// assistant content. tea.Println/tea.Printf are line-oriented (each call is
+	// committed to scrollback as its own line), so streamed deltas are buffered
+	// and only flushed once a complete line is available — otherwise every token
+	// would land on its own line. The trailing partial line is flushed when the
+	// response completes (see flushStreamLineBuffer).
+	streamLineBuffer string
 }
 
 func initialModel(

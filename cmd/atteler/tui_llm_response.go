@@ -42,7 +42,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.streamedContent {
-			cmds = append(cmds, tea.Println(""))
+			cmds = append(cmds, appendStreamCmds(m.flushStreamLineBuffer(), tea.Println(""))...)
 		}
 
 		cmds = append(
@@ -83,7 +83,7 @@ func (m model) updateLLMResponse(msg llmResponseMsg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, llmToolLogCommands(msg.toolLog, msg.liveEvents)...)
 
 	if msg.streamedContent {
-		cmds = append(cmds, tea.Println(""))
+		cmds = append(cmds, appendStreamCmds(m.flushStreamLineBuffer(), tea.Println(""))...)
 	} else {
 		cmds = append(cmds, tea.Println(header+"\n"+msg.content))
 	}

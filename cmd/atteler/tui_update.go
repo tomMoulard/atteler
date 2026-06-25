@@ -110,19 +110,22 @@ func (m model) updateLLMLiveMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
 		header := assistantLabel.Render("Assistant") + " " +
 			dimStyle.Render("("+msg.model+")")
 
+		// Flush any partial line left over from a previous model call (e.g. text
+		// emitted before a tool call) so it can't merge into the new header.
 		return m, tea.Sequence(
-			tea.Println(header),
-			listenForLLMLiveMessage(msg.liveCh),
+			appendStreamCmds(m.flushStreamLineBuffer(), tea.Println(header), listenForLLMLiveMessage(msg.liveCh))...,
 		)
 	case llmStreamDeltaMsg:
+		printCmd := m.bufferStreamDelta(msg.content)
+
 		return m, tea.Sequence(
-			tea.Printf("%s", msg.content),
-			listenForLLMLiveMessage(msg.liveCh),
+			appendStreamCmds(printCmd, listenForLLMLiveMessage(msg.liveCh))...,
 		)
 	case llmToolOutputMsg:
+		// Tool output belongs on its own line, so flush any buffered assistant
+		// text before it.
 		return m, tea.Sequence(
-			tea.Printf("%s", formatLLMToolOutputChunk(msg)),
-			listenForLLMLiveMessage(msg.liveCh),
+			appendStreamCmds(m.flushStreamLineBuffer(), tea.Printf("%s", formatLLMToolOutputChunk(msg)), listenForLLMLiveMessage(msg.liveCh))...,
 		)
 	default:
 		return m, nil
@@ -135,6 +138,67 @@ func formatLLMToolOutputChunk(msg llmToolOutputMsg) string {
 	}
 
 	return msg.data
+}
+
+// bufferStreamDelta appends a streamed content delta to the line buffer and
+// returns a command that prints any completed (newline-terminated) lines, or
+// nil when only a partial line has accumulated so far. tea.Printf commits each
+// call to scrollback as its own line, so deltas must be coalesced into whole
+// lines before printing — otherwise every streamed token lands on its own line.
+func (m *model) bufferStreamDelta(content string) tea.Cmd {
+	m.streamLineBuffer += content
+
+	complete, remainder, ok := splitStreamLines(m.streamLineBuffer)
+	if !ok {
+		return nil
+	}
+
+	m.streamLineBuffer = remainder
+
+	return tea.Printf("%s", complete)
+}
+
+// splitStreamLines divides buffered streamed content into the run of complete,
+// newline-terminated lines (with the trailing newline removed, since tea.Printf
+// re-adds one) and the leftover partial line. ok is false when no newline has
+// arrived yet, in which case the whole buffer is the partial line.
+func splitStreamLines(buf string) (complete, remainder string, ok bool) {
+	idx := strings.LastIndexByte(buf, '\n')
+	if idx < 0 {
+		return "", buf, false
+	}
+
+	return buf[:idx], buf[idx+1:], true
+}
+
+// flushStreamLineBuffer prints and clears any buffered partial line of streamed
+// assistant content, returning nil when nothing is buffered. It is called when
+// the stream is interrupted by other output (a new model call, tool output) or
+// when the response completes.
+func (m *model) flushStreamLineBuffer() tea.Cmd {
+	if m.streamLineBuffer == "" {
+		return nil
+	}
+
+	line := m.streamLineBuffer
+	m.streamLineBuffer = ""
+
+	return tea.Printf("%s", line)
+}
+
+// appendStreamCmds drops nil commands and returns the rest in order. tea.Sequence
+// must not receive nil commands, and the stream flush helpers return nil when
+// there is nothing buffered.
+func appendStreamCmds(cmds ...tea.Cmd) []tea.Cmd {
+	out := make([]tea.Cmd, 0, len(cmds))
+
+	for _, cmd := range cmds {
+		if cmd != nil {
+			out = append(out, cmd)
+		}
+	}
+
+	return out
 }
 
 func (m model) updateShellMessage(msg tea.Msg) (tea.Model, tea.Cmd) {
