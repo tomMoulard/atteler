@@ -1946,7 +1946,29 @@ func mergePlugins(dst *Config, plugins filePluginConfig, rec *originRecorder, so
 		dst.Plugins.Policy = &policy
 
 		rec.replace("plugins.policy", source, "configured", "replaces the plugin execution policy")
+		recordPluginPolicyOrigins(rec, source, policy)
 	}
+}
+
+func recordPluginPolicyOrigins(rec *originRecorder, source originSource, policy attelerplugin.Policy) {
+	const note = "set by full plugin policy replacement"
+
+	rec.replace(pluginPolicyFieldPath("permissions", "filesystem", "read"), source, policy.Permissions.Filesystem.Read, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "filesystem", "write"), source, policy.Permissions.Filesystem.Write, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "network", "allow"), source, policy.Permissions.Network.Allow, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "network", "hosts"), source, policy.Permissions.Network.Hosts, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "shell", "allow"), source, policy.Permissions.Shell.Allow, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "env"), source, policy.Permissions.Env, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "secrets"), source, policy.Permissions.Secrets, note)
+	rec.replace(pluginPolicyFieldPath("permissions", "tools"), source, policy.Permissions.Tools, note)
+	rec.replace(pluginPolicyFieldPath("output", "stdout_max_bytes"), source, policy.Output.StdoutMaxBytes, note)
+	rec.replace(pluginPolicyFieldPath("output", "stderr_max_bytes"), source, policy.Output.StderrMaxBytes, note)
+	rec.replace(pluginPolicyFieldPath("trusted_install_sources"), source, policy.TrustedInstallSources, note)
+	rec.replace(pluginPolicyFieldPath("require_signature"), source, policy.RequireSignature, note)
+}
+
+func pluginPolicyFieldPath(fields ...string) string {
+	return dottedPath(append([]string{"plugins", "policy"}, fields...)...)
 }
 
 func mergeSkillLearning(dst *Config, skillLearning fileSkillLearningConfig, rec *originRecorder, source originSource) {
@@ -2871,6 +2893,7 @@ func mergeConfigPlugins(dst *Config, plugins PluginConfig, rec *originRecorder, 
 		dst.Plugins.Policy = &policy
 
 		rec.replace("plugins.policy", source, "configured", "replaces the plugin execution policy")
+		recordPluginPolicyOrigins(rec, source, policy)
 	}
 }
 
@@ -3783,6 +3806,30 @@ func mergeConfigPluginsFromOrigins(dst *Config, plugins PluginConfig, dstOrigins
 		dst.Plugins.Policy = &policy
 
 		appendOriginChain(dstOrigins, "plugins.policy", srcOrigins, true)
+		appendPluginPolicyOriginChains(dstOrigins, srcOrigins)
+	}
+}
+
+func appendPluginPolicyOriginChains(dstOrigins, srcOrigins OriginMap) {
+	for _, path := range pluginPolicyOriginPaths() {
+		appendOriginChain(dstOrigins, path, srcOrigins, true)
+	}
+}
+
+func pluginPolicyOriginPaths() []string {
+	return []string{
+		pluginPolicyFieldPath("permissions", "filesystem", "read"),
+		pluginPolicyFieldPath("permissions", "filesystem", "write"),
+		pluginPolicyFieldPath("permissions", "network", "allow"),
+		pluginPolicyFieldPath("permissions", "network", "hosts"),
+		pluginPolicyFieldPath("permissions", "shell", "allow"),
+		pluginPolicyFieldPath("permissions", "env"),
+		pluginPolicyFieldPath("permissions", "secrets"),
+		pluginPolicyFieldPath("permissions", "tools"),
+		pluginPolicyFieldPath("output", "stdout_max_bytes"),
+		pluginPolicyFieldPath("output", "stderr_max_bytes"),
+		pluginPolicyFieldPath("trusted_install_sources"),
+		pluginPolicyFieldPath("require_signature"),
 	}
 }
 
